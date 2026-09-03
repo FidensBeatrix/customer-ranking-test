@@ -17,43 +17,47 @@ import streamlit as st
 
 def check_login():
 
-    if st.session_state.get("logged_in"):
-        return True
+if st.session_state.get("logged_in"):
+    return True
 
-    st.title("Customer Ranking")
-    st.subheader("Login")
+st.title("Customer Ranking")
+st.subheader("Login")
 
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
+username = st.text_input("Username")
+password = st.text_input("Password", type="password")
 
-    if st.button("Login"):
+if st.button("Login"):
 
-        if (
-            username == st.secrets["APP_USERNAME"]
-            and password == st.secrets["APP_PASSWORD"]
-        ):
-            st.session_state.logged_in = True
-            st.rerun()
+    if (
+        username == st.secrets["APP_USERNAME"]
+        and password == st.secrets["APP_PASSWORD"]
+    ):
+        st.session_state.logged_in = True
+        st.rerun()
 
-        else:
-            st.error("Invalid username or password.")
+    else:
+        st.error("Invalid username or password.")
 
-    return False
-
+return False
 
 if not check_login():
-    st.stop()
+st.stop()
 
 #region APP CONFIGURATION
 
 APP_TITLE = "Customer Scoring - Web V15"
 BASE_DIR = Path(__file__).parent
-DATA_FILE = BASE_DIR / "Customer_Scoring.xlsx"
+COPY_DATA_FILE = BASE_DIR / "Customer_Scoring - Copy.xlsx"
+ORIGINAL_DATA_FILE = BASE_DIR / "Customer_Scoring.xlsx"
+
+# Use the newly modified workbook when it exists.
+# This keeps the app compatible with the previous GitHub filename as well.
+DATA_FILE = COPY_DATA_FILE if COPY_DATA_FILE.exists() else ORIGINAL_DATA_FILE
 ASSETS_DIR = BASE_DIR / "assets"
 
 SPINMASTER_LOGO_PATH = ASSETS_DIR / "SpinMaster-Logo-CMYK.png"
 PRIMAL_HATCH_IMAGE_PATH = ASSETS_DIR / "PrimalHatch_Jurassic_DinoFreedom-2025.png"
-PAW_HEADER_IMAGE_PATH = ASSETS_DIR / "PAW_CSG25_Grp_005_CGI.npg"
+PAW_HEADER_IMAGE_PATH = ASSETS_DIR / "PAW_CSG25_Grp_005_CGI.png"
 
 MAX_TOTAL = 15
 
@@ -257,8 +261,68 @@ def format_workbook(wb):
             ws.column_dimensions[get_column_letter(col)].width = min(max(max_len + 2, 11), 30)
 
 
+def normalize_scores_schema(wb):
+    """
+    Make the Scores sheet compatible with the current web app.
+
+    Supported input layouts:
+    1. Current 13-column layout with 'Frequency'
+    2. The modified workbook where column E is accidentally named 'Bequency'
+    3. Older 12-column layout without a Frequency column
+
+    The function preserves all existing score data.
+    """
+    if "Scores" not in wb.sheetnames:
+        ws = wb.create_sheet("Scores", 0)
+        ws.append([
+            "Year", "Week", "Region", "Customer", "Frequency",
+            "Timeliness", "Layout Consistency", "Data Completeness",
+            "Material Mapping", "Manual Effort", "Total", "Life %", "Saved At"
+        ])
+        return
+
+    ws = wb["Scores"]
+    headers = [
+        str(ws.cell(1, i).value or "").strip()
+        for i in range(1, ws.max_column + 1)
+    ]
+
+    # The new Customer_Scoring - Copy.xlsx contains the correct Frequency
+    # values in column E, but its header is written as "Bequency".
+    # Only fix the header; do NOT shift any data.
+    if len(headers) >= 5 and headers[4].casefold() == "bequency":
+        ws.cell(1, 5).value = "Frequency"
+        headers[4] = "Frequency"
+
+    if "Frequency" in headers:
+        return
+
+    # Genuine old layout: no Frequency column existed at all.
+    # Insert it between Customer and Timeliness and derive the frequency.
+    ws.insert_cols(5)
+    ws.cell(1, 5).value = "Frequency"
+
+    for row_idx in range(2, ws.max_row + 1):
+        region = ws.cell(row_idx, 3).value
+        customer = ws.cell(row_idx, 4).value
+
+        if region and customer:
+            ws.cell(row_idx, 5).value = get_customer_frequency(
+                str(region),
+                str(customer),
+            )
+        else:
+            ws.cell(row_idx, 5).value = DEFAULT_FREQUENCY
+
+
 def ensure_workbook():
     if DATA_FILE.exists():
+        wb = load_workbook(DATA_FILE)
+        normalize_scores_schema(wb)
+        format_workbook(wb)
+        wb.save(DATA_FILE)
+        wb.close()
+
         sync_customer_master()
         return
 
@@ -405,36 +469,11 @@ def get_last_saved_period():
 
 
 def migrate_old_scores_if_needed(wb):
-    ws = wb["Scores"]
-    headers = [ws.cell(1, i).value for i in range(1, ws.max_column + 1)]
-
-    if "Frequency" in headers:
-        return
-
-    old_rows = list(ws.iter_rows(min_row=2, values_only=True))
-    old_index = wb.sheetnames.index("Scores")
-    wb.remove(ws)
-
-    nws = wb.create_sheet("Scores", old_index)
-    nws.append([
-        "Year", "Week", "Region", "Customer", "Frequency",
-        "Timeliness", "Layout Consistency", "Data Completeness",
-        "Material Mapping", "Manual Effort", "Total", "Life %", "Saved At"
-    ])
-
-    for row in old_rows:
-        if not row or row[0] is None:
-            continue
-
-        region = str(row[2])
-        customer = str(row[3])
-        freq = get_customer_frequency(region, customer)
-
-        nws.append([
-            row[0], row[1], row[2], row[3], freq,
-            row[4], row[5], row[6], row[7], row[8],
-            row[9], row[10], row[11]
-        ])
+    """
+    Backward-compatible wrapper.
+    The actual schema handling is centralized in normalize_scores_schema().
+    """
+    normalize_scores_schema(wb)
 
 
 def save_batch_to_excel(batch, year, week):
@@ -496,6 +535,7 @@ def save_batch_to_excel(batch, year, week):
 def load_all_scores():
     ensure_workbook()
 
+    # ensure_workbook() already normalizes the stored file.
     wb = load_workbook(DATA_FILE, data_only=True)
     ws = wb["Scores"]
     headers = [ws.cell(1, i).value for i in range(1, ws.max_column + 1)]
@@ -1183,34 +1223,22 @@ inject_css()
 ensure_workbook()
 init_session_state()
 
-header_logo, header_title, header_paw = st.columns([0.7, 4.8, 0.9], vertical_alignment="center")
-
-with header_logo:
-    if SPINMASTER_LOGO_PATH.exists():
-        st.image(str(SPINMASTER_LOGO_PATH), width=92)
-
-with header_title:
-    st.markdown(
-        """
-        <div class="sm-header">
-            <h1>CUSTOMER SCORING</h1>
-            <span>WEB V15 • CUSTOMER RANKING</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-with header_paw:
-    if PAW_HEADER_IMAGE_PATH.exists():
-        st.image(str(PAW_HEADER_IMAGE_PATH), width=82)
+st.markdown(
+    """
+    <div class="sm-header">
+        <h1>CUSTOMER SCORING</h1>
+        <span>WEB V15 • STREAMLIT PROTOTYPE</span>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 with st.sidebar:
     st.header("Data file")
 
     st.caption(
-        "The app reads and updates the bundled Customer_Scoring.xlsx. "
-        "Download a backup whenever needed. For the final multi-user version, "
-        "we will connect this same logic to the SharePoint master workbook."
+        "Prototype storage: Streamlit keeps a local Customer_Scoring.xlsx. "
+        "For the final corporate version we can replace this with SharePoint or a proper database."
     )
 
     uploaded_db = st.file_uploader(
