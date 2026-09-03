@@ -16,32 +16,31 @@ from PIL import Image, ImageDraw, ImageFont
 import streamlit as st
 
 def check_login():
+    if st.session_state.get("logged_in"):
+        return True
 
-if st.session_state.get("logged_in"):
-    return True
+    st.title("Customer Ranking")
+    st.subheader("Login")
 
-st.title("Customer Ranking")
-st.subheader("Login")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
 
-username = st.text_input("Username")
-password = st.text_input("Password", type="password")
+    if st.button("Login"):
+        if (
+            username == st.secrets["APP_USERNAME"]
+            and password == st.secrets["APP_PASSWORD"]
+        ):
+            st.session_state.logged_in = True
+            st.rerun()
+        else:
+            st.error("Invalid username or password.")
 
-if st.button("Login"):
+    return False
 
-    if (
-        username == st.secrets["APP_USERNAME"]
-        and password == st.secrets["APP_PASSWORD"]
-    ):
-        st.session_state.logged_in = True
-        st.rerun()
-
-    else:
-        st.error("Invalid username or password.")
-
-return False
 
 if not check_login():
-st.stop()
+    st.stop()
+
 
 #region APP CONFIGURATION
 
