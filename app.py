@@ -13,50 +13,17 @@ from PIL import Image, ImageDraw, ImageFont
 
 #endregion IMPORTS
 
-import streamlit as st
-
-def check_login():
-    if st.session_state.get("logged_in"):
-        return True
-
-    st.title("Customer Ranking")
-    st.subheader("Login")
-
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
-
-    if st.button("Login"):
-        if (
-            username == st.secrets["APP_USERNAME"]
-            and password == st.secrets["APP_PASSWORD"]
-        ):
-            st.session_state.logged_in = True
-            st.rerun()
-        else:
-            st.error("Invalid username or password.")
-
-    return False
-
-
-if not check_login():
-    st.stop()
-
 
 #region APP CONFIGURATION
 
-APP_TITLE = "Customer Scoring - Web V15"
+APP_TITLE = "Customer Scoring - Web V19"
 BASE_DIR = Path(__file__).parent
-COPY_DATA_FILE = BASE_DIR / "Customer_Scoring - Copy.xlsx"
-ORIGINAL_DATA_FILE = BASE_DIR / "Customer_Scoring.xlsx"
-
-# Use the newly modified workbook when it exists.
-# This keeps the app compatible with the previous GitHub filename as well.
-DATA_FILE = COPY_DATA_FILE if COPY_DATA_FILE.exists() else ORIGINAL_DATA_FILE
+DATA_FILE = BASE_DIR / "Customer_Scoring.xlsx"
 ASSETS_DIR = BASE_DIR / "assets"
 
 SPINMASTER_LOGO_PATH = ASSETS_DIR / "SpinMaster-Logo-CMYK.png"
 PRIMAL_HATCH_IMAGE_PATH = ASSETS_DIR / "PrimalHatch_Jurassic_DinoFreedom-2025.png"
-PAW_HEADER_IMAGE_PATH = ASSETS_DIR / "PAW_CSG25_Grp_005_CGI.png"
+PAW_HEADER_IMAGE_PATH = ASSETS_DIR / "PAW_CSG25_Grp_005_CGI.jpg"
 
 MAX_TOTAL = 15
 
@@ -145,6 +112,41 @@ DEFAULT_CUSTOMERS = {
     "NORDICS": ["Lekia", "SG"],
 }
 
+# Amazon UK/FR/DE/ES/IT/NL are scored once as one combined customer.
+# The score-entry panel shows them only as AMAZON / Amazon.
+# The ranking expands that one score back into the normal reporting regions.
+SPECIAL_AMAZON_SCORE_REGION = "AMAZON"
+SPECIAL_AMAZON_SCORE_CUSTOMER = "Amazon"
+SPECIAL_AMAZON_REPORT_CUSTOMERS = {
+    "UK": "Amazon UK",
+    "FR": "Amazon FR",
+    "GAS": "Amazon DE",
+    "IBER": "Amazon ES",
+    "IT": "Amazon IT",
+    "BNL": "Amazon NL",
+}
+SPECIAL_AMAZON_CUSTOMER_NAMES = set(SPECIAL_AMAZON_REPORT_CUSTOMERS.values())
+
+
+def load_scoring_customer_master():
+    """Customer master used only by the scoring panel."""
+    master = load_customer_master()
+    scoring_master = {}
+
+    for region, entries in master.items():
+        scoring_master[region] = [
+            dict(entry)
+            for entry in entries
+            if entry["customer"] not in SPECIAL_AMAZON_CUSTOMER_NAMES
+        ]
+
+    scoring_master[SPECIAL_AMAZON_SCORE_REGION] = [{
+        "customer": SPECIAL_AMAZON_SCORE_CUSTOMER,
+        "frequency": "Weekly",
+    }]
+    return scoring_master
+
+
 DEFAULT_FREQUENCY = "Weekly"
 
 MONTHLY_CUSTOMERS = {
@@ -201,6 +203,39 @@ def get_customer_frequency(region, customer):
     if customer in MONTHLY_CUSTOMERS:
         return "Monthly"
     return "Weekly"
+
+
+def previous_reporting_month(year, month, offset=1):
+    """Move backwards by reporting months, handling year boundaries."""
+    y, m = year, month
+    for _ in range(offset):
+        m -= 1
+        if m < 1:
+            m = 12
+            y -= 1
+    return y, m
+
+
+def periods_for_reporting_month(year, month):
+    """Return ISO year/week tuples for one 4-4-5 reporting month."""
+    return [(year, w) for w in weeks_for_month(month)]
+
+
+def periods_for_last_months(anchor_year, anchor_week, count):
+    """Return all weeks belonging to the previous N reporting months."""
+    anchor_month = month_for_week(anchor_week)
+    month_keys = [
+        previous_reporting_month(anchor_year, anchor_month, offset)
+        for offset in range(count, 0, -1)
+    ]
+    periods = []
+    for y, m in month_keys:
+        periods.extend(periods_for_reporting_month(y, m))
+    return periods
+
+
+def reporting_month_key(year, week):
+    return year, month_for_week(week)
 
 
 def parse_custom_weeks(year, text):
@@ -260,68 +295,8 @@ def format_workbook(wb):
             ws.column_dimensions[get_column_letter(col)].width = min(max(max_len + 2, 11), 30)
 
 
-def normalize_scores_schema(wb):
-    """
-    Make the Scores sheet compatible with the current web app.
-
-    Supported input layouts:
-    1. Current 13-column layout with 'Frequency'
-    2. The modified workbook where column E is accidentally named 'Bequency'
-    3. Older 12-column layout without a Frequency column
-
-    The function preserves all existing score data.
-    """
-    if "Scores" not in wb.sheetnames:
-        ws = wb.create_sheet("Scores", 0)
-        ws.append([
-            "Year", "Week", "Region", "Customer", "Frequency",
-            "Timeliness", "Layout Consistency", "Data Completeness",
-            "Material Mapping", "Manual Effort", "Total", "Life %", "Saved At"
-        ])
-        return
-
-    ws = wb["Scores"]
-    headers = [
-        str(ws.cell(1, i).value or "").strip()
-        for i in range(1, ws.max_column + 1)
-    ]
-
-    # The new Customer_Scoring - Copy.xlsx contains the correct Frequency
-    # values in column E, but its header is written as "Bequency".
-    # Only fix the header; do NOT shift any data.
-    if len(headers) >= 5 and headers[4].casefold() == "bequency":
-        ws.cell(1, 5).value = "Frequency"
-        headers[4] = "Frequency"
-
-    if "Frequency" in headers:
-        return
-
-    # Genuine old layout: no Frequency column existed at all.
-    # Insert it between Customer and Timeliness and derive the frequency.
-    ws.insert_cols(5)
-    ws.cell(1, 5).value = "Frequency"
-
-    for row_idx in range(2, ws.max_row + 1):
-        region = ws.cell(row_idx, 3).value
-        customer = ws.cell(row_idx, 4).value
-
-        if region and customer:
-            ws.cell(row_idx, 5).value = get_customer_frequency(
-                str(region),
-                str(customer),
-            )
-        else:
-            ws.cell(row_idx, 5).value = DEFAULT_FREQUENCY
-
-
 def ensure_workbook():
     if DATA_FILE.exists():
-        wb = load_workbook(DATA_FILE)
-        normalize_scores_schema(wb)
-        format_workbook(wb)
-        wb.save(DATA_FILE)
-        wb.close()
-
         sync_customer_master()
         return
 
@@ -468,11 +443,36 @@ def get_last_saved_period():
 
 
 def migrate_old_scores_if_needed(wb):
-    """
-    Backward-compatible wrapper.
-    The actual schema handling is centralized in normalize_scores_schema().
-    """
-    normalize_scores_schema(wb)
+    ws = wb["Scores"]
+    headers = [ws.cell(1, i).value for i in range(1, ws.max_column + 1)]
+
+    if "Frequency" in headers:
+        return
+
+    old_rows = list(ws.iter_rows(min_row=2, values_only=True))
+    old_index = wb.sheetnames.index("Scores")
+    wb.remove(ws)
+
+    nws = wb.create_sheet("Scores", old_index)
+    nws.append([
+        "Year", "Week", "Region", "Customer", "Frequency",
+        "Timeliness", "Layout Consistency", "Data Completeness",
+        "Material Mapping", "Manual Effort", "Total", "Life %", "Saved At"
+    ])
+
+    for row in old_rows:
+        if not row or row[0] is None:
+            continue
+
+        region = str(row[2])
+        customer = str(row[3])
+        freq = get_customer_frequency(region, customer)
+
+        nws.append([
+            row[0], row[1], row[2], row[3], freq,
+            row[4], row[5], row[6], row[7], row[8],
+            row[9], row[10], row[11]
+        ])
 
 
 def save_batch_to_excel(batch, year, week):
@@ -534,7 +534,6 @@ def save_batch_to_excel(batch, year, week):
 def load_all_scores():
     ensure_workbook()
 
-    # ensure_workbook() already normalizes the stored file.
     wb = load_workbook(DATA_FILE, data_only=True)
     ws = wb["Scores"]
     headers = [ws.cell(1, i).value for i in range(1, ws.max_column + 1)]
@@ -583,120 +582,112 @@ def workbook_bytes():
 
 #region VISUAL DATA PREPARATION
 
-def periods_back(year, week, count=5):
+def periods_back(year, week, count=4):
+    """Return chronological ISO week periods ending at the selected week."""
     current = datetime.fromisocalendar(year, week, 1)
     result = []
-
     for offset in range(count - 1, -1, -1):
         d = current - timedelta(weeks=offset)
         iso = d.isocalendar()
         result.append((iso.year, iso.week))
-
     return result
 
 
-def prepare_visual_rows(
-    year,
-    week,
-    mode,
-    region_filter,
-    frequency_filter,
-    custom_periods=None,
-):
+def prepare_visual_rows(periods, region_filter, frequency_filter):
+    """Build ranking rows for the selected periods.
+
+    Weekly customers are averaged by available selected weeks. Monthly customers
+    are averaged by reporting month, so a 5-week month does not get more weight
+    than a 4-week month. Missing periods are ignored rather than scored as zero.
+    """
     records = load_all_scores()
-
-    if mode == "Latest Week":
-        periods = [(year, week)]
-    elif mode == "Last 5 Weeks":
-        periods = periods_back(year, week, 5)
-    else:
-        periods = custom_periods or []
-
     wanted = set(periods)
 
-    filtered = []
+    # Expand one combined AMAZON / Amazon score back into the six reporting
+    # customers. If old individual Amazon scores exist for the same week, the
+    # combined score takes precedence to avoid duplicate report rows.
+    combined_amazon_periods = {
+        (r["year"], r["week"])
+        for r in records
+        if r["region"] == SPECIAL_AMAZON_SCORE_REGION
+        and r["customer"] == SPECIAL_AMAZON_SCORE_CUSTOMER
+    }
 
+    report_records = []
     for r in records:
+        period_key = (r["year"], r["week"])
+
+        if r["customer"] in SPECIAL_AMAZON_CUSTOMER_NAMES and period_key in combined_amazon_periods:
+            continue
+
+        if (
+            r["region"] == SPECIAL_AMAZON_SCORE_REGION
+            and r["customer"] == SPECIAL_AMAZON_SCORE_CUSTOMER
+        ):
+            for report_region, report_customer in SPECIAL_AMAZON_REPORT_CUSTOMERS.items():
+                expanded = dict(r)
+                expanded["region"] = report_region
+                expanded["customer"] = report_customer
+                expanded["frequency"] = "Weekly"
+                expanded["scores"] = dict(r["scores"])
+                report_records.append(expanded)
+            continue
+
+        report_records.append(r)
+
+    filtered = []
+    for r in report_records:
         if (r["year"], r["week"]) not in wanted:
             continue
-
         if region_filter != "All Regions" and r["region"] != region_filter:
             continue
-
         if frequency_filter != "All" and r["frequency"] != frequency_filter:
             continue
-
         filtered.append(r)
 
-    if mode == "Latest Week":
-        rows = []
-
-        for r in filtered:
-            life = float(r["life"] or 0)
-
-            rows.append({
-                "region": r["region"],
-                "customer": r["customer"],
-                "frequency": r["frequency"],
-                "life": life,
-                "scores": {
-                    key: float(value or 0)
-                    for key, value in r["scores"].items()
-                },
-                "available": 1,
-                "selected_count": 1,
-            })
-
-        rows.sort(key=lambda x: (-x["life"], x["customer"]))
-        return rows, periods
-
     grouped = {}
-
     for r in filtered:
         key = (r["region"], r["customer"], r["frequency"])
+        grouped.setdefault(key, {
+            "region": r["region"],
+            "customer": r["customer"],
+            "frequency": r["frequency"],
+            "records": {},
+        })
 
-        grouped.setdefault(
-            key,
-            {
-                "region": r["region"],
-                "customer": r["customer"],
-                "frequency": r["frequency"],
-                "records": {},
-            },
-        )
+        if r["frequency"] == "Monthly":
+            period_key = reporting_month_key(r["year"], r["week"])
+        else:
+            period_key = (r["year"], r["week"])
 
-        grouped[key]["records"][(r["year"], r["week"])] = r
+        grouped[key]["records"][period_key] = r
 
     rows = []
+    selected_months = []
+    for y, w in periods:
+        key = reporting_month_key(y, w)
+        if key not in selected_months:
+            selected_months.append(key)
 
     for g in grouped.values():
+        expected_keys = selected_months if g["frequency"] == "Monthly" else periods
         available_records = [
-            g["records"][p]
-            for p in periods
-            if p in g["records"]
+            g["records"][k]
+            for k in expected_keys
+            if k in g["records"]
         ]
-
         if not available_records:
             continue
 
-        avg_life = (
-            sum(float(r["life"] or 0) for r in available_records)
-            / len(available_records)
-        )
-
+        avg_life = sum(float(r["life"] or 0) for r in available_records) / len(available_records)
         avg_scores = {}
-
         for category, _tooltip in CATEGORIES:
             values = [
                 float(r["scores"].get(category) or 0)
                 for r in available_records
                 if r["scores"].get(category) is not None
             ]
-
-            avg_scores[category] = (
-                sum(values) / len(values)
-                if values else 0
-            )
+            avg_scores[category] = sum(values) / len(values) if values else 0
 
         rows.append({
             "region": g["region"],
@@ -705,11 +696,11 @@ def prepare_visual_rows(
             "life": avg_life,
             "scores": avg_scores,
             "available": len(available_records),
-            "selected_count": len(periods),
+            "selected_count": len(expected_keys),
         })
 
     rows.sort(key=lambda x: (-x["life"], x["customer"]))
-    return rows, periods
+    return rows
 
 
 #endregion VISUAL DATA PREPARATION
@@ -799,7 +790,7 @@ def draw_score_dots(draw, x, y, score, color):
             )
 
 
-def render_ranking(rows, year, week, mode, periods):
+def render_ranking(rows, year, week, mode, periods, frequency_filter="All"):
     width = 1160
     top_h, header_h, row_h, footer_h = 155, 62, 48, 18
     count = max(1, len(rows))
@@ -818,7 +809,6 @@ def render_ranking(rows, year, week, mode, periods):
 
     d.rectangle((0, 0, width, top_h), fill="#06131f")
 
-    # Optional logo if user later adds it to /assets.
     if SPINMASTER_LOGO_PATH.exists():
         try:
             logo = Image.open(SPINMASTER_LOGO_PATH).convert("RGBA")
@@ -836,37 +826,50 @@ def render_ranking(rows, year, week, mode, periods):
             pass
 
     centered(d, (180, 16, width - 180, 66), "CUSTOMER RANKING", title, "#ffc928")
+    view_label = mode.upper()
 
-    if mode == "Latest Week":
-        view_label = "LATEST WEEK"
-    elif mode == "Last 5 Weeks":
-        view_label = "LAST 5 WEEKS"
+    monthly_view = frequency_filter == "Monthly" and mode in ("Last Month", "Last 3 Months")
+
+    if monthly_view and periods:
+        month_keys = []
+        for period_year, period_week in periods:
+            key = reporting_month_key(period_year, period_week)
+            if key not in month_keys:
+                month_keys.append(key)
+
+        month_names = [label.split(" - ", 1)[1] for label in MONTH_LABELS]
+
+        if mode == "Last Month":
+            display_month_year, display_month = month_keys[-1]
+            period_heading = f"{month_names[display_month - 1]} / {display_month_year}"
+            summary = ""
+        else:
+            first_year, first_month = month_keys[0]
+            last_year, last_month = month_keys[-1]
+            if first_year == last_year:
+                period_heading = f"{month_names[first_month - 1]} - {month_names[last_month - 1]} / {last_year}"
+            else:
+                period_heading = (
+                    f"{month_names[first_month - 1]} / {first_year} - "
+                    f"{month_names[last_month - 1]} / {last_year}"
+                )
+            summary = "AVERAGE OF AVAILABLE MONTHLY SCORES • " + "  ".join(
+                f"{month_names[m - 1]} {y}" for y, m in month_keys
+            )
+
+        centered(d, (180, 70, width - 180, 101), f"{view_label}  •  {period_heading}", sub, "#f3f7fb")
     else:
-        view_label = "CUSTOM PERIOD"
-
-    centered(
-        d,
-        (220, 70, width - 220, 101),
-        f"{view_label}  •  W{week} / {year}",
-        sub,
-        "#f3f7fb",
-    )
-
-    if mode == "Latest Week":
-        summary = ""
-    else:
-        summary = "AVERAGE OF AVAILABLE SCORES • " + "  ".join(
-            f"W{w}" for _, w in periods
-        )
+        centered(d, (180, 70, width - 180, 101), f"{view_label}  •  W{week} / {year}", sub, "#f3f7fb")
+        if len(periods) == 1:
+            summary = ""
+        else:
+            period_text = "  ".join(f"{y}-W{w}" for y, w in periods)
+            if len(period_text) > 105:
+                period_text = f"{len(periods)} selected weeks ending {periods[-1][0]}-W{periods[-1][1]}"
+            summary = "AVERAGE OF AVAILABLE SCORES • " + period_text
 
     if summary:
-        centered(
-            d,
-            (170, 108, width - 170, 136),
-            summary,
-            small,
-            "#c7d8e5",
-        )
+        centered(d, (170, 108, width - 170, 136), summary, small, "#c7d8e5")
 
     x_rank, w_rank = 12, 60
     x_customer, w_customer = 72, 205
@@ -894,94 +897,35 @@ def render_ranking(rows, year, week, mode, periods):
         centered(d, (x1 + 3, hy1, x2 - 3, hy2), label, small, CATEGORY_COLORS[key])
 
     start_y = hy2
-
     if not rows:
-        centered(
-            d,
-            (0, start_y, width, start_y + row_h),
-            "NO SCORES MATCH THE CURRENT FILTERS",
-            body,
-            "#9eb2c2",
-        )
+        centered(d, (0, start_y, width, start_y + row_h), "NO SCORES MATCH THE CURRENT FILTERS", body, "#9eb2c2")
 
     for idx, r in enumerate(rows, start=1):
         y1 = start_y + (idx - 1) * row_h
         y2 = start_y + idx * row_h
+        d.rectangle((15, y1, width - 15, y2), fill="#091825" if idx % 2 else "#0c1e2d")
 
-        d.rectangle(
-            (15, y1, width - 15, y2),
-            fill="#091825" if idx % 2 else "#0c1e2d",
-        )
-
-        for x in [
-            x_rank, x_customer, x_health, x_cat,
-            x_cat + cat_w, x_cat + 2 * cat_w,
-            x_cat + 3 * cat_w, x_cat + 4 * cat_w,
-            x_cat + 5 * cat_w,
-        ]:
+        for x in [x_rank, x_customer, x_health, x_cat, x_cat + cat_w, x_cat + 2 * cat_w, x_cat + 3 * cat_w, x_cat + 4 * cat_w, x_cat + 5 * cat_w]:
             d.line((x, y1, x, y2), fill="#2f6f8f", width=1)
-
         d.line((15, y2, width - 15, y2), fill="#2f6f8f", width=1)
 
-        centered(
-            d,
-            (x_rank, y1, x_rank + w_rank, y2),
-            str(idx),
-            rankf,
-            "#ffc928" if idx == 1 else "#dbe8f0",
-        )
-
-        d.text(
-            (x_customer + 10, y1 + 6),
-            r["customer"],
-            font=body,
-            fill="#f3f7fb",
-        )
-
-        d.text(
-            (x_customer + 10, y1 + 27),
-            f'{r["region"]} • {r["frequency"]}',
-            font=small,
-            fill="#9eb2c2",
-        )
+        centered(d, (x_rank, y1, x_rank + w_rank, y2), str(idx), rankf, "#ffc928" if idx == 1 else "#dbe8f0")
+        d.text((x_customer + 10, y1 + 6), r["customer"], font=body, fill="#f3f7fb")
+        d.text((x_customer + 10, y1 + 27), f'{r["region"]} • {r["frequency"]}', font=small, fill="#9eb2c2")
 
         life_pct = max(0, min(100, r["life"] * 100))
-
-        bx1 = x_health + 10
-        by1 = y1 + 10
-        bx2 = x_health + 205
-        by2 = y1 + 32
-
-        d.rounded_rectangle(
-            (bx1, by1, bx2, by2),
-            radius=6,
-            fill="#061018",
-            outline="#8cc8df",
-            width=2,
-        )
-
+        bx1, by1, bx2, by2 = x_health + 10, y1 + 10, x_health + 205, y1 + 32
+        d.rounded_rectangle((bx1, by1, bx2, by2), radius=6, fill="#061018", outline="#8cc8df", width=2)
         fw = int((bx2 - bx1 - 6) * life_pct / 100)
-
         if fw > 0:
-            d.rounded_rectangle(
-                (bx1 + 3, by1 + 3, bx1 + 3 + fw, by2 - 3),
-                radius=4,
-                fill=life_color(life_pct),
-            )
-
-        d.text(
-            (x_health + 218, y1 + 11),
-            f"{life_pct:.0f}%",
-            font=pctf,
-            fill=life_color(life_pct),
-        )
+            d.rounded_rectangle((bx1 + 3, by1 + 3, bx1 + 3 + fw, by2 - 3), radius=4, fill=life_color(life_pct))
+        d.text((x_health + 218, y1 + 11), f"{life_pct:.0f}%", font=pctf, fill=life_color(life_pct))
 
         scores = r["scores"] or {}
-
-        if mode != "Latest Week":
+        if len(periods) > 1:
             d.text(
                 (x_health + 10, y1 + 34),
-                f'Based on {r["available"]}/{r["selected_count"]} selected week(s)',
+                f'Based on {r["available"]}/{r["selected_count"]} available period(s)',
                 font=font(10),
                 fill="#9eb2c2",
             )
@@ -989,16 +933,9 @@ def render_ranking(rows, year, week, mode, periods):
         for i, (key, _) in enumerate(cat_short):
             x1 = x_cat + i * cat_w
             score = float(scores.get(key, 0) or 0)
+            draw_score_dots(d, x1 + 30, y1 + 20, score, CATEGORY_COLORS[key])
 
-            draw_score_dots(
-                d,
-                x1 + 30,
-                y1 + 20,
-                score,
-                CATEGORY_COLORS[key],
-            )
-
-            if mode != "Latest Week":
+            if len(periods) > 1:
                 centered(
                     d,
                     (x1 + 3, y1 + 30, x1 + cat_w - 3, y2 - 1),
@@ -1033,6 +970,11 @@ def init_session_state():
         "region": "UK",
         "customer": "",
         "customer_search": "",
+        "rank_region": "All Regions",
+        "rank_frequency": "All",
+        "rank_mode": "Current Week",
+        "rank_custom_count": 6,
+        "rank_custom_unit": "Weeks",
         "score_Timeliness": 3,
         "score_Layout Consistency": 3,
         "score_Data Completeness": 3,
@@ -1222,22 +1164,34 @@ inject_css()
 ensure_workbook()
 init_session_state()
 
-st.markdown(
-    """
-    <div class="sm-header">
-        <h1>CUSTOMER SCORING</h1>
-        <span>WEB V15 • STREAMLIT PROTOTYPE</span>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+header_logo, header_title, header_paw = st.columns([0.7, 4.8, 0.9], vertical_alignment="center")
+
+with header_logo:
+    if SPINMASTER_LOGO_PATH.exists():
+        st.image(str(SPINMASTER_LOGO_PATH), width=92)
+
+with header_title:
+    st.markdown(
+        """
+        <div class="sm-header">
+            <h1>CUSTOMER SCORING</h1>
+            <span>WEB V19 • CUSTOMER RANKING</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+with header_paw:
+    if PAW_HEADER_IMAGE_PATH.exists():
+        st.image(str(PAW_HEADER_IMAGE_PATH), width=82)
 
 with st.sidebar:
     st.header("Data file")
 
     st.caption(
-        "Prototype storage: Streamlit keeps a local Customer_Scoring.xlsx. "
-        "For the final corporate version we can replace this with SharePoint or a proper database."
+        "The app reads and updates the bundled Customer_Scoring.xlsx. "
+        "Download a backup whenever needed. For the final multi-user version, "
+        "we will connect this same logic to the SharePoint master workbook."
     )
 
     uploaded_db = st.file_uploader(
@@ -1271,7 +1225,7 @@ tab_score, tab_rank = st.tabs(["📝 Score Customers", "🏆 Customer Ranking"])
 
 # -------------------- SCORE CUSTOMERS --------------------
 with tab_score:
-    master = load_customer_master()
+    master = load_scoring_customer_master()
     regions = list(master.keys())
 
     if st.session_state.region not in regions and regions:
@@ -1485,115 +1439,165 @@ with tab_score:
 # -------------------- CUSTOMER RANKING --------------------
 with tab_rank:
     latest_year, latest_week = get_last_saved_period()
+    report_regions = ["All Regions"] + sorted(load_customer_master().keys())
 
+    # Region decides which frequency choices are meaningful.
+    region_frequency_options = {
+        "UK": ["Weekly"],
+        "GAS": ["All", "Weekly", "Monthly"],
+        "FR": ["All", "Weekly", "Monthly"],
+        "BNL": ["Weekly"],
+        "IT": ["Weekly"],
+        "IBER": ["Weekly"],
+        "GR": ["Monthly"],
+        "CEE": ["All", "Weekly", "Monthly"],
+        "NORDICS": ["Weekly"],
+    }
+
+    if st.session_state.rank_region not in report_regions:
+        st.session_state.rank_region = "All Regions"
+
+    # Render Region and Frequency first logically, even though View sits in the
+    # left visual column. This lets the View choices react to Frequency.
     top1, top2, top3 = st.columns([1.1, 1, 1])
-
-    with top1:
-        mode = st.selectbox(
-            "View",
-            options=["Latest Week", "Last 5 Weeks", "Custom"],
-        )
 
     with top2:
         rank_region = st.selectbox(
             "Region",
-            options=["All Regions"] + sorted(load_customer_master().keys()),
+            options=report_regions,
             key="rank_region",
         )
+
+    allowed_frequencies = (
+        ["All", "Weekly", "Monthly"]
+        if rank_region == "All Regions"
+        else region_frequency_options.get(rank_region, ["All", "Weekly", "Monthly"])
+    )
+
+    if st.session_state.rank_frequency not in allowed_frequencies:
+        st.session_state.rank_frequency = "All" if "All" in allowed_frequencies else allowed_frequencies[0]
 
     with top3:
         rank_frequency = st.selectbox(
             "Frequency",
-            options=["All", "Weekly", "Monthly"],
+            options=allowed_frequencies,
             key="rank_frequency",
         )
 
-    custom_periods = None
-    display_year = latest_year
-    display_week = latest_week
+    if rank_frequency == "Weekly":
+        view_options = ["Current Week", "Last 4 Weeks", "Custom"]
+        default_mode = "Current Week"
+        allowed_custom_units = ["Weeks"]
+    elif rank_frequency == "Monthly":
+        view_options = ["Last Month", "Last 3 Months", "Custom"]
+        default_mode = "Last Month"
+        allowed_custom_units = ["Weeks", "Months"]
+    else:
+        view_options = ["Current Week", "Last 4 Weeks", "Last Month", "Last 3 Months", "Custom"]
+        default_mode = "Current Week"
+        allowed_custom_units = ["Weeks", "Months"]
 
-    if mode == "Custom":
-        c1, c2 = st.columns([1, 2])
+    if st.session_state.rank_mode not in view_options:
+        st.session_state.rank_mode = default_mode
+
+    with top1:
+        mode = st.selectbox(
+            "View",
+            options=view_options,
+            key="rank_mode",
+        )
+
+    if st.session_state.rank_custom_unit not in allowed_custom_units:
+        st.session_state.rank_custom_unit = allowed_custom_units[0]
+
+    custom_periods = []
+
+    if mode == "Current Week":
+        periods = [(latest_year, latest_week)]
+    elif mode == "Last 4 Weeks":
+        periods = periods_back(latest_year, latest_week, 4)
+    elif mode == "Last Month":
+        anchor_month = month_for_week(latest_week)
+        y, m = previous_reporting_month(latest_year, anchor_month, 1)
+        periods = periods_for_reporting_month(y, m)
+    elif mode == "Last 3 Months":
+        periods = periods_for_last_months(latest_year, latest_week, 3)
+    else:
+        c1, c2 = st.columns([1, 1])
 
         with c1:
-            custom_year = st.number_input(
-                "Custom Year",
-                min_value=2020,
-                max_value=2100,
-                value=int(latest_year),
+            custom_count = st.number_input(
+                "Custom length",
+                min_value=1,
+                max_value=104,
                 step=1,
+                key="rank_custom_count",
             )
 
         with c2:
-            custom_weeks_text = st.text_input(
-                "Weeks",
-                placeholder="Examples: 30,31,34 or 28-34",
+            custom_unit = st.selectbox(
+                "Unit",
+                options=allowed_custom_units,
+                key="rank_custom_unit",
             )
 
-        try:
-            custom_periods = parse_custom_weeks(
-                int(custom_year),
-                custom_weeks_text,
-            )
-        except Exception:
-            st.error("Use week input such as 30,31,34 or 28-34.")
-            custom_periods = []
+        if rank_frequency == "Weekly":
+            st.caption("Custom Weekly view: choose how many weeks ending with the current reporting week.")
+        elif rank_frequency == "Monthly":
+            st.caption("Custom Monthly view: choose a number of weeks or previous reporting months.")
+        else:
+            st.caption("Custom view: choose how many weeks or previous reporting months to include.")
 
-        if custom_periods:
-            display_year, display_week = custom_periods[-1]
+        if custom_unit == "Months":
+            custom_periods = periods_for_last_months(latest_year, latest_week, int(custom_count))
+        else:
+            custom_periods = periods_back(latest_year, latest_week, int(custom_count))
+        periods = custom_periods
 
-    rows, periods = prepare_visual_rows(
-        latest_year,
-        latest_week,
+    rows = prepare_visual_rows(periods, rank_region, rank_frequency)
+    display_year, display_week = periods[-1] if periods else (latest_year, latest_week)
+
+    ranking_image = render_ranking(
+        rows,
+        display_year,
+        display_week,
         mode,
-        rank_region,
-        rank_frequency,
-        custom_periods=custom_periods,
+        periods,
+        frequency_filter=rank_frequency,
     )
 
-    if mode == "Custom" and not custom_periods:
-        st.info("Enter one or more custom weeks to generate the ranking.")
-    else:
-        ranking_image = render_ranking(
-            rows,
-            display_year,
-            display_week,
-            mode,
-            periods,
+    st.image(ranking_image, use_container_width=True)
+
+    safe_mode = mode.replace(" ", "_")
+    png_name = (
+        f"Customer_Ranking_{safe_mode}_"
+        f"{rank_region.replace(' ', '_')}_"
+        f"{rank_frequency}.png"
+    )
+
+    st.download_button(
+        "EXPORT PNG",
+        data=image_to_png_bytes(ranking_image),
+        file_name=png_name,
+        mime="image/png",
+        type="primary",
+    )
+
+    with st.expander("Category / Health explanation"):
+        for category, tooltip in CATEGORIES:
+            st.markdown(f"**{category}**")
+            st.text(tooltip)
+
+        st.markdown(
+            """
+            **Health bar**
+
+            90–100% — Excellent  
+            75–89% — Good  
+            50–74% — Average  
+            25–49% — Poor  
+            0–24% — Critical
+            """
         )
-
-        st.image(ranking_image, use_container_width=True)
-
-        safe_mode = mode.replace(" ", "_")
-        png_name = (
-            f"Customer_Ranking_{safe_mode}_"
-            f"{rank_region.replace(' ', '_')}_"
-            f"{rank_frequency}.png"
-        )
-
-        st.download_button(
-            "EXPORT PNG",
-            data=image_to_png_bytes(ranking_image),
-            file_name=png_name,
-            mime="image/png",
-            type="primary",
-        )
-
-        with st.expander("Category / Health explanation"):
-            for category, tooltip in CATEGORIES:
-                st.markdown(f"**{category}**")
-                st.text(tooltip)
-
-            st.markdown(
-                """
-                **Health bar**
-
-                90–100% — Excellent  
-                75–89% — Good  
-                50–74% — Average  
-                25–49% — Poor  
-                0–24% — Critical
-                """
-            )
 
 #endregion STREAMLIT APP
