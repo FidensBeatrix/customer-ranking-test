@@ -1,6 +1,8 @@
 #region IMPORTS
 
 from io import BytesIO
+import hmac
+from zipfile import BadZipFile
 from pathlib import Path
 from datetime import datetime, timedelta
 from collections import defaultdict
@@ -16,7 +18,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 #region APP CONFIGURATION
 
-APP_TITLE = "Customer Scoring - Web V19"
+APP_TITLE = "Customer Scoring - Web V24"
 BASE_DIR = Path(__file__).parent
 DATA_FILE = BASE_DIR / "Customer_Scoring.xlsx"
 ASSETS_DIR = BASE_DIR / "assets"
@@ -26,6 +28,18 @@ PRIMAL_HATCH_IMAGE_PATH = ASSETS_DIR / "PrimalHatch_Jurassic_DinoFreedom-2025.pn
 PAW_HEADER_IMAGE_PATH = ASSETS_DIR / "PAW_CSG25_Grp_005_CGI.jpg"
 
 MAX_TOTAL = 15
+
+# Login accounts.
+# You can either fill these four values directly OR leave them blank and use
+# Streamlit Secrets with the same key names.
+# IMPORTANT: if this GitHub repository is shared/public, use Streamlit Secrets
+# instead of putting real passwords here.
+ADMIN_USERNAME = "Venitas"
+ADMIN_PASSWORD = "ResNonVerba"
+VIEW_USERNAME = "Spinmaster"
+VIEW_PASSWORD = "ReportAndAnalytics"
+
+AUTH_SESSION_VERSION = "v3-two-role-login"
 
 MONTH_WEEK_MAPPING = {
     1:  [1, 2, 3, 4],
@@ -296,9 +310,20 @@ def format_workbook(wb):
 
 
 def ensure_workbook():
+    """Ensure the Excel database exists and is readable.
+
+    Returns (True, None) when ready. If an existing xlsx is damaged, the
+    function leaves it untouched and returns (False, error_message) so the
+    admin can replace it from the login-protected recovery screen.
+    """
     if DATA_FILE.exists():
-        sync_customer_master()
-        return
+        try:
+            test_wb = load_workbook(DATA_FILE, read_only=True, data_only=True)
+            test_wb.close()
+            sync_customer_master()
+            return True, None
+        except (BadZipFile, OSError, ValueError, KeyError) as exc:
+            return False, str(exc)
 
     wb = Workbook()
     ws = wb.active
@@ -319,6 +344,7 @@ def ensure_workbook():
     format_workbook(wb)
     wb.save(DATA_FILE)
     wb.close()
+    return True, None
 
 
 def sync_customer_master():
@@ -593,6 +619,27 @@ def periods_back(year, week, count=4):
     return result
 
 
+def safe_number(value, default=0.0):
+    """Convert Excel/Streamlit values to float without crashing the ranking.
+
+    Handles blank cells, percentage text and Excel error strings such as
+    #N/A / #VALUE!. Invalid values are treated as the supplied default.
+    """
+    if value is None or value == "":
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text or text.startswith("#"):
+        return default
+    try:
+        if text.endswith("%"):
+            return float(text[:-1].replace(",", ".")) / 100.0
+        return float(text.replace(",", "."))
+    except (TypeError, ValueError):
+        return default
+
+
 def prepare_visual_rows(periods, region_filter, frequency_filter):
     """Build ranking rows for the selected periods.
 
@@ -679,11 +726,11 @@ def prepare_visual_rows(periods, region_filter, frequency_filter):
         if not available_records:
             continue
 
-        avg_life = sum(float(r["life"] or 0) for r in available_records) / len(available_records)
+        avg_life = sum(safe_number(r["life"]) for r in available_records) / len(available_records)
         avg_scores = {}
         for category, _tooltip in CATEGORIES:
             values = [
-                float(r["scores"].get(category) or 0)
+                safe_number(r["scores"].get(category))
                 for r in available_records
                 if r["scores"].get(category) is not None
             ]
@@ -913,7 +960,7 @@ def render_ranking(rows, year, week, mode, periods, frequency_filter="All"):
         d.text((x_customer + 10, y1 + 6), r["customer"], font=body, fill="#f3f7fb")
         d.text((x_customer + 10, y1 + 27), f'{r["region"]} • {r["frequency"]}', font=small, fill="#9eb2c2")
 
-        life_pct = max(0, min(100, r["life"] * 100))
+        life_pct = max(0, min(100, safe_number(r["life"]) * 100))
         bx1, by1, bx2, by2 = x_health + 10, y1 + 10, x_health + 205, y1 + 32
         d.rounded_rectangle((bx1, by1, bx2, by2), radius=6, fill="#061018", outline="#8cc8df", width=2)
         fw = int((bx2 - bx1 - 6) * life_pct / 100)
@@ -932,7 +979,7 @@ def render_ranking(rows, year, week, mode, periods, frequency_filter="All"):
 
         for i, (key, _) in enumerate(cat_short):
             x1 = x_cat + i * cat_w
-            score = float(scores.get(key, 0) or 0)
+            score = safe_number(scores.get(key, 0))
             draw_score_dots(d, x1 + 30, y1 + 20, score, CATEGORY_COLORS[key])
 
             if len(periods) > 1:
@@ -1087,8 +1134,8 @@ def save_pending_batch():
     st.session_state.pending_scores = {}
 
     st.success(
-        f"{customer_count} customer score(s) saved. "
-        f"Excel week-periods written: {period_count}."
+        f"{customer_count} customer score(s) saved to Excel. "
+        f"Week-periods written: {period_count}."
     )
 
     return True
@@ -1152,6 +1199,128 @@ def inject_css():
 #endregion STREAMLIT UI HELPERS
 
 
+#region AUTHENTICATION
+
+def _credential_value(name):
+    """Read a credential from app.py first, then Streamlit Secrets."""
+    local_value = globals().get(name, "")
+    if local_value not in (None, ""):
+        return str(local_value)
+
+    try:
+        if name in st.secrets:
+            return str(st.secrets[name])
+    except Exception:
+        pass
+
+    # Also support the older nested [auth] secrets format.
+    nested_names = {
+        "ADMIN_USERNAME": "admin_username",
+        "ADMIN_PASSWORD": "admin_password",
+        "VIEW_USERNAME": "viewer_username",
+        "VIEW_PASSWORD": "viewer_password",
+    }
+    try:
+        auth = st.secrets["auth"]
+        nested_key = nested_names[name]
+        if nested_key in auth:
+            return str(auth[nested_key])
+    except Exception:
+        pass
+
+    return ""
+
+
+def _configured_users():
+    """Return the two configured login accounts and their permissions."""
+    admin_username = _credential_value("ADMIN_USERNAME")
+    admin_password = _credential_value("ADMIN_PASSWORD")
+    view_username = _credential_value("VIEW_USERNAME")
+    view_password = _credential_value("VIEW_PASSWORD")
+
+    if not all((admin_username, admin_password, view_username, view_password)):
+        return None
+
+    return {
+        admin_username: {
+            "password": admin_password,
+            "role": "admin",
+            "label": "Full access",
+        },
+        view_username: {
+            "password": view_password,
+            "role": "viewer",
+            "label": "Ranking only",
+        },
+    }
+
+def require_login():
+    """Show a login screen and stop the app until the user is authenticated."""
+    # A version key prevents an old single-login Streamlit session from silently
+    # bypassing this new two-role login after a deployment.
+    if st.session_state.get("auth_session_version") != AUTH_SESSION_VERSION:
+        for key in ("authenticated", "auth_role", "auth_username", "logged_in"):
+            st.session_state.pop(key, None)
+        st.session_state.auth_session_version = AUTH_SESSION_VERSION
+
+    if st.session_state.get("authenticated"):
+        return st.session_state.get("auth_role", "viewer")
+
+    users = _configured_users()
+
+    st.markdown("<div style='height:7vh'></div>", unsafe_allow_html=True)
+    left, center, right = st.columns([1.25, 1, 1.25])
+
+    with center:
+        if SPINMASTER_LOGO_PATH.exists():
+            st.image(str(SPINMASTER_LOGO_PATH), use_container_width=True)
+
+        st.markdown("## Customer Scoring")
+        st.caption("Sign in to continue")
+
+        if not users:
+            st.error("Login credentials are not configured in Streamlit Secrets.")
+            st.code(
+                'ADMIN_USERNAME = "your-admin-name"\n'
+                'ADMIN_PASSWORD = "your-admin-password"\n'
+                'VIEW_USERNAME = "your-view-name"\n'
+                'VIEW_PASSWORD = "your-view-password"',
+                language="toml",
+            )
+            st.stop()
+
+        with st.form("login_form", clear_on_submit=False):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("LOG IN", type="primary", use_container_width=True)
+
+        if submitted:
+            account = users.get(username.strip())
+            password_ok = (
+                account is not None
+                and hmac.compare_digest(password, account["password"])
+            )
+
+            if password_ok:
+                st.session_state.authenticated = True
+                st.session_state.auth_role = account["role"]
+                st.session_state.auth_username = username.strip()
+                st.rerun()
+            else:
+                st.error("Wrong username or password.")
+
+    st.stop()
+
+
+def logout():
+    for key in ("authenticated", "auth_role", "auth_username"):
+        st.session_state.pop(key, None)
+    st.rerun()
+
+
+#endregion AUTHENTICATION
+
+
 #region STREAMLIT APP
 
 st.set_page_config(
@@ -1161,7 +1330,45 @@ st.set_page_config(
 )
 
 inject_css()
-ensure_workbook()
+auth_role = require_login()
+
+# Validate the Excel database only AFTER successful login. A damaged xlsx
+# should never prevent the login page itself from loading.
+workbook_ok, workbook_error = ensure_workbook()
+if not workbook_ok:
+    st.error(
+        "The Customer_Scoring.xlsx file in this deployment is damaged or incomplete. "
+        "The app will not overwrite it automatically."
+    )
+
+    if auth_role == "admin":
+        st.info("Upload a valid Customer_Scoring.xlsx below to repair the app.")
+        recovery_file = st.file_uploader(
+            "Replacement Customer_Scoring.xlsx",
+            type=["xlsx"],
+            key="recovery_database_upload",
+        )
+
+        if recovery_file is not None and st.button(
+            "REPLACE DAMAGED WORKBOOK",
+            type="primary",
+            use_container_width=True,
+        ):
+            try:
+                payload = recovery_file.getvalue()
+                # Validate before replacing the deployed file.
+                check_wb = load_workbook(BytesIO(payload), read_only=True, data_only=True)
+                check_wb.close()
+                DATA_FILE.write_bytes(payload)
+                st.success("Workbook replaced successfully. Reloading app...")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"That upload is not a valid Excel workbook: {exc}")
+    else:
+        st.warning("The scoring database needs to be repaired by the admin account.")
+
+    st.stop()
+
 init_session_state()
 
 header_logo, header_title, header_paw = st.columns([0.7, 4.8, 0.9], vertical_alignment="center")
@@ -1175,7 +1382,7 @@ with header_title:
         """
         <div class="sm-header">
             <h1>CUSTOMER SCORING</h1>
-            <span>WEB V19 • CUSTOMER RANKING</span>
+            <span>WEB V24 • CUSTOMER RANKING</span>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1186,254 +1393,265 @@ with header_paw:
         st.image(str(PAW_HEADER_IMAGE_PATH), width=82)
 
 with st.sidebar:
-    st.header("Data file")
+    st.caption(f"Signed in as **{st.session_state.get('auth_username', '')}**")
+    st.caption("Full access" if auth_role == "admin" else "Ranking only")
+    if st.button("LOG OUT", use_container_width=True):
+        logout()
 
-    st.caption(
-        "The app reads and updates the bundled Customer_Scoring.xlsx. "
-        "Download a backup whenever needed. For the final multi-user version, "
-        "we will connect this same logic to the SharePoint master workbook."
-    )
-
-    uploaded_db = st.file_uploader(
-        "Load an existing Customer_Scoring.xlsx",
-        type=["xlsx"],
-        key="database_upload",
-    )
-
-    if uploaded_db is not None:
-        if st.button("Use uploaded workbook", use_container_width=True):
-            try:
-                replace_data_file(uploaded_db)
-                st.success("Workbook loaded.")
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Could not load workbook: {exc}")
-
-    st.download_button(
-        "Download current workbook",
-        data=workbook_bytes(),
-        file_name="Customer_Scoring.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-    )
-
-    st.divider()
-    st.caption("Optional images can later be added to an `assets` folder in GitHub.")
-
-tab_score, tab_rank = st.tabs(["📝 Score Customers", "🏆 Customer Ranking"])
-
-
-# -------------------- SCORE CUSTOMERS --------------------
-with tab_score:
-    master = load_scoring_customer_master()
-    regions = list(master.keys())
-
-    if st.session_state.region not in regions and regions:
-        st.session_state.region = regions[0]
-
-    left, middle, right = st.columns([1.05, 1.05, 1.8], gap="large")
-
-    with left:
-        st.markdown('<div class="section-title">Selection</div>', unsafe_allow_html=True)
-
-        period_a, period_b = st.columns(2)
-
-        with period_a:
-            st.number_input(
-                "Year",
-                min_value=2020,
-                max_value=2100,
-                step=1,
-                key="year",
-            )
-
-        with period_b:
-            st.number_input(
-                "Week",
-                min_value=1,
-                max_value=53,
-                step=1,
-                key="week",
-            )
-
-        region = st.selectbox(
-            "Region",
-            options=regions,
-            key="region",
-        )
-
-        st.text_input(
-            "Search customer",
-            key="customer_search",
-            placeholder="Type part of customer name...",
-        )
-
-        entries = master.get(region, [])
-        search_text = st.session_state.customer_search.strip().lower()
-
-        visible_entries = [
-            e for e in entries
-            if search_text in e["customer"].lower()
-        ]
-
-        # Determine selection frequency before period field.
-        customer_names = [e["customer"] for e in visible_entries]
-
-        if st.session_state.customer not in customer_names:
-            st.session_state.customer = customer_names[0] if customer_names else ""
-
-        customer = st.selectbox(
-            "Customer",
-            options=customer_names if customer_names else [""],
-            key="customer",
-        )
-
-        frequency = (
-            get_customer_frequency(region, customer)
-            if customer else "Weekly"
-        )
-
-        if frequency == "Monthly":
-            st.selectbox(
-                "Reporting month",
-                options=list(range(1, 13)),
-                format_func=lambda m: MONTH_LABELS[m - 1],
-                key="month",
-            )
-            selected_weeks = weeks_for_month(int(st.session_state.month))
-            st.caption(
-                "Monthly customer • score will be written to "
-                + ", ".join(f"W{w}" for w in selected_weeks)
-            )
-        else:
-            st.caption(f"Weekly customer • score will be written to W{int(st.session_state.week)}")
-
-        completed = selected_completed_customers(frequency)
-
-        if customer:
-            if customer in st.session_state.pending_scores:
-                st.info("🟦 This customer is already in the pending batch.")
-            elif customer in completed:
-                st.success("✅ Already saved for the selected period.")
-            else:
-                st.caption("⬜ Not scored yet for the selected period.")
-
-        st.caption("W = Weekly • M = Monthly")
-
-    with middle:
-        st.markdown('<div class="section-title">Score Customer</div>', unsafe_allow_html=True)
-        st.caption("Choose a score from 0 to 3 for each category.")
-
-        for category, tooltip in CATEGORIES:
-            st.radio(
-                category,
-                options=[0, 1, 2, 3],
-                horizontal=True,
-                key=f"score_{category}",
-                help=tooltip,
-            )
-
-        add_col, reset_col = st.columns(2)
-
-        with add_col:
-            if st.button(
-                "ADD TO BATCH",
-                type="primary",
-                use_container_width=True,
-            ):
-                try:
-                    add_current_customer_to_batch(region, customer)
-                except Exception as exc:
-                    st.error(str(exc))
-
-        with reset_col:
-            if st.button("RESET 3/3", use_container_width=True):
-                for category, _ in CATEGORIES:
-                    st.session_state[f"score_{category}"] = 3
-                st.rerun()
-
-        if PRIMAL_HATCH_IMAGE_PATH.exists():
-            try:
-                st.image(str(PRIMAL_HATCH_IMAGE_PATH), width=150)
-            except Exception:
-                pass
-
-    with right:
-        st.markdown('<div class="section-title">Pending Batch</div>', unsafe_allow_html=True)
-
-        rows = pending_table_rows()
-
-        if rows:
-            st.dataframe(
-                rows,
-                use_container_width=True,
-                hide_index=True,
-            )
-
-            remove_customer = st.selectbox(
-                "Pending customer to edit/remove",
-                options=[""] + list(st.session_state.pending_scores.keys()),
-            )
-
-            b1, b2, b3 = st.columns(3)
-
-            with b1:
-                if st.button("LOAD SCORES", use_container_width=True, disabled=not remove_customer):
-                    item = st.session_state.pending_scores[remove_customer]
-                    st.session_state.region = item["region"]
-                    st.session_state.customer = remove_customer
-                    st.session_state.year = item["year"]
-
-                    if item["frequency"] == "Monthly":
-                        st.session_state.month = month_for_week(item["target_weeks"][0])
-                    else:
-                        st.session_state.week = item["target_weeks"][0]
-
-                    for category, _ in CATEGORIES:
-                        st.session_state[f"score_{category}"] = int(item["scores"][category])
-
-                    st.rerun()
-
-            with b2:
-                if st.button("REMOVE", use_container_width=True, disabled=not remove_customer):
-                    st.session_state.pending_scores.pop(remove_customer, None)
-                    st.rerun()
-
-            with b3:
-                if st.button("CLEAR BATCH", use_container_width=True):
-                    st.session_state.pending_scores = {}
-                    st.rerun()
-
-            total_pending = len(st.session_state.pending_scores)
-            avg_pending = (
-                sum(sum(item["scores"].values()) for item in st.session_state.pending_scores.values())
-                / (total_pending * MAX_TOTAL)
-                * 100
-            )
-
-            m1, m2 = st.columns(2)
-            m1.metric("Pending customers", total_pending)
-            m2.metric("Average health", f"{avg_pending:.0f}%")
-
-            if st.button(
-                "ULTIMATE SAVE",
-                type="primary",
-                use_container_width=True,
-            ):
-                save_pending_batch()
-
-        else:
-            st.info("No pending scores yet. Select a customer, score it, then add it to the batch.")
-
+    if auth_role == "admin":
         st.divider()
+        st.header("Data file")
+
+        st.caption(
+            "The app reads and updates the bundled Customer_Scoring.xlsx. "
+            "Download a backup whenever needed."
+        )
+
+        uploaded_db = st.file_uploader(
+            "Load an existing Customer_Scoring.xlsx",
+            type=["xlsx"],
+            key="database_upload",
+        )
+
+        if uploaded_db is not None:
+            if st.button("Use uploaded workbook", use_container_width=True):
+                try:
+                    replace_data_file(uploaded_db)
+                    st.success("Workbook loaded.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Could not load workbook: {exc}")
 
         st.download_button(
-            "DOWNLOAD CUSTOMER_SCORING.XLSX",
+            "Download current workbook",
             data=workbook_bytes(),
             file_name="Customer_Scoring.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
+
+        st.divider()
+        st.caption("Optional images can later be added to an `assets` folder in GitHub.")
+
+if auth_role == "admin":
+    tab_score, tab_rank = st.tabs(["📝 Score Customers", "🏆 Customer Ranking"])
+else:
+    tab_score = None
+    (tab_rank,) = st.tabs(["🏆 Customer Ranking"])
+
+
+# -------------------- SCORE CUSTOMERS --------------------
+if auth_role == "admin":
+    with tab_score:
+        master = load_scoring_customer_master()
+        regions = list(master.keys())
+
+        if st.session_state.region not in regions and regions:
+            st.session_state.region = regions[0]
+
+        left, middle, right = st.columns([1.05, 1.05, 1.8], gap="large")
+
+        with left:
+            st.markdown('<div class="section-title">Selection</div>', unsafe_allow_html=True)
+
+            period_a, period_b = st.columns(2)
+
+            with period_a:
+                st.number_input(
+                    "Year",
+                    min_value=2020,
+                    max_value=2100,
+                    step=1,
+                    key="year",
+                )
+
+            with period_b:
+                st.number_input(
+                    "Week",
+                    min_value=1,
+                    max_value=53,
+                    step=1,
+                    key="week",
+                )
+
+            region = st.selectbox(
+                "Region",
+                options=regions,
+                key="region",
+            )
+
+            st.text_input(
+                "Search customer",
+                key="customer_search",
+                placeholder="Type part of customer name...",
+            )
+
+            entries = master.get(region, [])
+            search_text = st.session_state.customer_search.strip().lower()
+
+            visible_entries = [
+                e for e in entries
+                if search_text in e["customer"].lower()
+            ]
+
+            # Determine selection frequency before period field.
+            customer_names = [e["customer"] for e in visible_entries]
+
+            if st.session_state.customer not in customer_names:
+                st.session_state.customer = customer_names[0] if customer_names else ""
+
+            customer = st.selectbox(
+                "Customer",
+                options=customer_names if customer_names else [""],
+                key="customer",
+            )
+
+            frequency = (
+                get_customer_frequency(region, customer)
+                if customer else "Weekly"
+            )
+
+            if frequency == "Monthly":
+                st.selectbox(
+                    "Reporting month",
+                    options=list(range(1, 13)),
+                    format_func=lambda m: MONTH_LABELS[m - 1],
+                    key="month",
+                )
+                selected_weeks = weeks_for_month(int(st.session_state.month))
+                st.caption(
+                    "Monthly customer • score will be written to "
+                    + ", ".join(f"W{w}" for w in selected_weeks)
+                )
+            else:
+                st.caption(f"Weekly customer • score will be written to W{int(st.session_state.week)}")
+
+            completed = selected_completed_customers(frequency)
+
+            if customer:
+                if customer in st.session_state.pending_scores:
+                    st.info("🟦 This customer is already in the pending batch.")
+                elif customer in completed:
+                    st.success("✅ Already saved for the selected period.")
+                else:
+                    st.caption("⬜ Not scored yet for the selected period.")
+
+            st.caption("W = Weekly • M = Monthly")
+
+        with middle:
+            st.markdown('<div class="section-title">Score Customer</div>', unsafe_allow_html=True)
+            st.caption("Choose a score from 0 to 3 for each category.")
+
+            for category, tooltip in CATEGORIES:
+                st.radio(
+                    category,
+                    options=[0, 1, 2, 3],
+                    horizontal=True,
+                    key=f"score_{category}",
+                    help=tooltip,
+                )
+
+            add_col, reset_col = st.columns(2)
+
+            with add_col:
+                if st.button(
+                    "ADD TO BATCH",
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    try:
+                        add_current_customer_to_batch(region, customer)
+                    except Exception as exc:
+                        st.error(str(exc))
+
+            with reset_col:
+                if st.button("RESET 3/3", use_container_width=True):
+                    for category, _ in CATEGORIES:
+                        st.session_state[f"score_{category}"] = 3
+                    st.rerun()
+
+            if PRIMAL_HATCH_IMAGE_PATH.exists():
+                try:
+                    st.image(str(PRIMAL_HATCH_IMAGE_PATH), width=150)
+                except Exception:
+                    pass
+
+        with right:
+            st.markdown('<div class="section-title">Pending Batch</div>', unsafe_allow_html=True)
+
+            rows = pending_table_rows()
+
+            if rows:
+                st.dataframe(
+                    rows,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                remove_customer = st.selectbox(
+                    "Pending customer to edit/remove",
+                    options=[""] + list(st.session_state.pending_scores.keys()),
+                )
+
+                b1, b2, b3 = st.columns(3)
+
+                with b1:
+                    if st.button("LOAD SCORES", use_container_width=True, disabled=not remove_customer):
+                        item = st.session_state.pending_scores[remove_customer]
+                        st.session_state.region = item["region"]
+                        st.session_state.customer = remove_customer
+                        st.session_state.year = item["year"]
+
+                        if item["frequency"] == "Monthly":
+                            st.session_state.month = month_for_week(item["target_weeks"][0])
+                        else:
+                            st.session_state.week = item["target_weeks"][0]
+
+                        for category, _ in CATEGORIES:
+                            st.session_state[f"score_{category}"] = int(item["scores"][category])
+
+                        st.rerun()
+
+                with b2:
+                    if st.button("REMOVE", use_container_width=True, disabled=not remove_customer):
+                        st.session_state.pending_scores.pop(remove_customer, None)
+                        st.rerun()
+
+                with b3:
+                    if st.button("CLEAR BATCH", use_container_width=True):
+                        st.session_state.pending_scores = {}
+                        st.rerun()
+
+                total_pending = len(st.session_state.pending_scores)
+                avg_pending = (
+                    sum(sum(item["scores"].values()) for item in st.session_state.pending_scores.values())
+                    / (total_pending * MAX_TOTAL)
+                    * 100
+                )
+
+                m1, m2 = st.columns(2)
+                m1.metric("Pending customers", total_pending)
+                m2.metric("Average health", f"{avg_pending:.0f}%")
+
+                if st.button(
+                    "ULTIMATE SAVE",
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    save_pending_batch()
+
+            else:
+                st.info("No pending scores yet. Select a customer, score it, then add it to the batch.")
+
+            st.divider()
+
+            st.download_button(
+                "DOWNLOAD CUSTOMER_SCORING.XLSX",
+                data=workbook_bytes(),
+                file_name="Customer_Scoring.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
 
 
 # -------------------- CUSTOMER RANKING --------------------
