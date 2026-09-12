@@ -4705,4 +4705,3 @@ components.html(
     height=825,
     scrolling=True
 )
-
