@@ -702,10 +702,14 @@ GAME_HTML = r"""
 /* =========================
    MOBILE TOUCH CONTROLS
    ========================= */
-#mobile-controls {
-    display: block;
-    margin: 12px auto 6px;
-    width: 210px;
+#arrow-controls {
+    flex-basis: 100%;
+    display: grid;
+    grid-template-columns: 78px 78px 78px;
+    grid-template-rows: 54px 54px;
+    gap: 8px;
+    justify-content: center;
+    margin: 8px auto 2px;
     user-select: none;
     -webkit-user-select: none;
     touch-action: none;
@@ -749,6 +753,19 @@ GAME_HTML = r"""
     font-size: 11px;
     opacity: .72;
     margin-top: 7px;
+}
+
+#controls #arrow-controls .mobile-move {
+    min-width: 0;
+    width: 78px;
+    height: 54px;
+    padding: 0;
+    margin: 0;
+    flex: none;
+    font-size: 25px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 
 @media (max-width: 700px) {
@@ -804,8 +821,8 @@ GAME_HTML = r"""
         font-size: 12px;
     }
 
-    #mobile-controls {
-        display: block;
+    #arrow-controls {
+        display: grid;
     }
 
     #help {
@@ -1027,17 +1044,16 @@ GAME_HTML = r"""
         Help
     </button>
 
-</div>
-
-<div id="mobile-controls" aria-label="Mobile movement controls">
-    <div class="mobile-pad">
+    <div id="arrow-controls" aria-label="Movement controls">
         <button class="mobile-move" id="move-up" aria-label="Move up">▲</button>
         <button class="mobile-move" id="move-left" aria-label="Move left">◀</button>
         <button class="mobile-move" id="move-down" aria-label="Move down">▼</button>
         <button class="mobile-move" id="move-right" aria-label="Move right">▶</button>
     </div>
-    <div id="mobile-hint">Tap the arrows or swipe directly on the playground</div>
+
 </div>
+
+<div id="mobile-hint">Use the arrows above to move • swipe also works on touch screens</div>
 
 <div id="help">
 
