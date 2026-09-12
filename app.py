@@ -702,18 +702,6 @@ GAME_HTML = r"""
 /* =========================
    MOBILE TOUCH CONTROLS
    ========================= */
-#arrow-controls {
-    flex-basis: 100%;
-    display: grid;
-    grid-template-columns: 78px 78px 78px;
-    grid-template-rows: 54px 54px;
-    gap: 8px;
-    justify-content: center;
-    margin: 8px auto 2px;
-    user-select: none;
-    -webkit-user-select: none;
-    touch-action: none;
-}
 
 .mobile-pad {
     display: grid;
@@ -755,18 +743,6 @@ GAME_HTML = r"""
     margin-top: 7px;
 }
 
-#controls #arrow-controls .mobile-move {
-    min-width: 0;
-    width: 78px;
-    height: 54px;
-    padding: 0;
-    margin: 0;
-    flex: none;
-    font-size: 25px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
 
 @media (max-width: 700px) {
 
@@ -819,10 +795,6 @@ GAME_HTML = r"""
         flex: 1 1 30%;
         padding: 9px 6px;
         font-size: 12px;
-    }
-
-    #arrow-controls {
-        display: grid;
     }
 
     #help {
@@ -1044,16 +1016,60 @@ GAME_HTML = r"""
         Help
     </button>
 
-    <div id="arrow-controls" aria-label="Movement controls">
-        <button class="mobile-move" id="move-up" aria-label="Move up">▲</button>
-        <button class="mobile-move" id="move-left" aria-label="Move left">◀</button>
-        <button class="mobile-move" id="move-down" aria-label="Move down">▼</button>
-        <button class="mobile-move" id="move-right" aria-label="Move right">▶</button>
-    </div>
-
 </div>
 
-<div id="mobile-hint">Use the arrows above to move • swipe also works on touch screens</div>
+<!-- ALWAYS-VISIBLE MOVEMENT PAD: no mobile detection, no media query -->
+<div id="movement-pad"
+     style="
+        display:flex !important;
+        flex-direction:column !important;
+        align-items:center !important;
+        justify-content:center !important;
+        width:100% !important;
+        margin:12px auto 8px auto !important;
+        visibility:visible !important;
+        opacity:1 !important;
+        position:relative !important;
+        z-index:9999 !important;
+     ">
+    <div style="color:#ffd166;font-weight:900;font-size:13px;margin-bottom:7px;">
+        MOVE
+    </div>
+
+    <button class="mobile-move" id="move-up" aria-label="Move up"
+            style="display:block !important;width:74px !important;height:54px !important;
+                   min-width:74px !important;margin:0 0 7px 0 !important;
+                   background:#7c3aed !important;color:white !important;
+                   border:0 !important;border-radius:13px !important;
+                   font-size:27px !important;font-weight:900 !important;">▲</button>
+
+    <div style="display:flex !important;gap:8px !important;justify-content:center !important;">
+        <button class="mobile-move" id="move-left" aria-label="Move left"
+                style="display:block !important;width:74px !important;height:54px !important;
+                       min-width:74px !important;margin:0 !important;
+                       background:#7c3aed !important;color:white !important;
+                       border:0 !important;border-radius:13px !important;
+                       font-size:27px !important;font-weight:900 !important;">◀</button>
+
+        <button class="mobile-move" id="move-down" aria-label="Move down"
+                style="display:block !important;width:74px !important;height:54px !important;
+                       min-width:74px !important;margin:0 !important;
+                       background:#7c3aed !important;color:white !important;
+                       border:0 !important;border-radius:13px !important;
+                       font-size:27px !important;font-weight:900 !important;">▼</button>
+
+        <button class="mobile-move" id="move-right" aria-label="Move right"
+                style="display:block !important;width:74px !important;height:54px !important;
+                       min-width:74px !important;margin:0 !important;
+                       background:#7c3aed !important;color:white !important;
+                       border:0 !important;border-radius:13px !important;
+                       font-size:27px !important;font-weight:900 !important;">▶</button>
+    </div>
+
+    <div style="color:#f8fafc;font-size:11px;opacity:.78;margin-top:8px;text-align:center;">
+        Tap the arrows to move
+    </div>
+</div>
 
 <div id="help">
 
@@ -4785,6 +4801,6 @@ GAME_HTML_FOR_USER = (
 
 components.html(
     GAME_HTML_FOR_USER,
-    height=825,
+    height=1050,
     scrolling=True
 )
