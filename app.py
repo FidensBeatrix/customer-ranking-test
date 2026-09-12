@@ -751,6 +751,36 @@ GAME_HTML = r"""
     margin-top: 7px;
 }
 
+/*
+   Streamlit renders components inside an iframe. On some phones the iframe
+   reports a desktop-like width, so the max-width media query below may not
+   fire even though the device is touch-first. JavaScript adds .touch-ui to
+   #ks-root on touch/coarse-pointer devices; these rules make the D-pad visible
+   and apply the compact game controls independently of iframe width.
+*/
+#ks-root.touch-ui #mobile-controls {
+    display: block !important;
+}
+
+#ks-root.touch-ui #game {
+    width: 96vw;
+    max-width: 100%;
+    border-width: 2px;
+    touch-action: none;
+}
+
+#ks-root.touch-ui #controls {
+    width: 98%;
+    gap: 6px;
+}
+
+#ks-root.touch-ui #controls button {
+    min-width: 0;
+    flex: 1 1 30%;
+    padding: 9px 6px;
+    font-size: 12px;
+}
+
 @media (max-width: 700px) {
 
     #ks-wrap {
@@ -1117,6 +1147,21 @@ if (
 }
 
 ROOT.dataset.ready = "1";
+
+/*
+   Detect touch-first devices directly instead of relying only on CSS viewport
+   width. Streamlit's component iframe can be wider than the actual phone
+   viewport, which previously kept the mobile D-pad hidden.
+*/
+const HAS_TOUCH_UI = Boolean(
+    (navigator.maxTouchPoints && navigator.maxTouchPoints > 0) ||
+    ("ontouchstart" in window) ||
+    (window.matchMedia && window.matchMedia("(pointer: coarse)").matches)
+);
+
+if (HAS_TOUCH_UI) {
+    ROOT.classList.add("touch-ui");
+}
 
 const CURRENT_USER = __CURRENT_USER_JSON__;
 const SUPABASE_URL = __SUPABASE_URL_JSON__;
