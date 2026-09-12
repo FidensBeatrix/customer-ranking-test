@@ -703,21 +703,12 @@ GAME_HTML = r"""
    MOBILE TOUCH CONTROLS
    ========================= */
 #mobile-controls {
-    /* Visible by default so touch devices inside Streamlit iframes never lose it. */
     display: block;
     margin: 12px auto 6px;
     width: 210px;
     user-select: none;
     -webkit-user-select: none;
     touch-action: none;
-}
-
-/* Hide the D-pad only on devices that clearly behave like desktop/mouse devices.
-   Unlike a width breakpoint, pointer/hover capability still works inside Streamlit's iframe. */
-@media (hover: hover) and (pointer: fine) {
-    #mobile-controls {
-        display: none;
-    }
 }
 
 .mobile-pad {
@@ -4455,17 +4446,6 @@ const touchDirections = {
     "move-left": [0, -1],
     "move-right": [0, 1]
 };
-
-/* Extra mobile-visibility safety net. Some embedded browsers report an iframe
-   width larger than the phone screen, so width-only media queries are unreliable. */
-const mobileControls = document.getElementById("mobile-controls");
-const isTouchDevice = (
-    (navigator.maxTouchPoints && navigator.maxTouchPoints > 0) ||
-    (window.matchMedia && window.matchMedia("(pointer: coarse)").matches)
-);
-if (mobileControls && isTouchDevice) {
-    mobileControls.style.setProperty("display", "block", "important");
-}
 
 /*
    Use BOTH touch and pointer/click events.
