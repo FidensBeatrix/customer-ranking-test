@@ -703,12 +703,21 @@ GAME_HTML = r"""
    MOBILE TOUCH CONTROLS
    ========================= */
 #mobile-controls {
-    display: none;
-    margin: 10px auto 4px;
+    /* Visible by default so touch devices inside Streamlit iframes never lose it. */
+    display: block;
+    margin: 12px auto 6px;
     width: 210px;
     user-select: none;
     -webkit-user-select: none;
     touch-action: none;
+}
+
+/* Hide the D-pad only on devices that clearly behave like desktop/mouse devices.
+   Unlike a width breakpoint, pointer/hover capability still works inside Streamlit's iframe. */
+@media (hover: hover) and (pointer: fine) {
+    #mobile-controls {
+        display: none;
+    }
 }
 
 .mobile-pad {
@@ -749,36 +758,6 @@ GAME_HTML = r"""
     font-size: 11px;
     opacity: .72;
     margin-top: 7px;
-}
-
-/*
-   Streamlit renders components inside an iframe. On some phones the iframe
-   reports a desktop-like width, so the max-width media query below may not
-   fire even though the device is touch-first. JavaScript adds .touch-ui to
-   #ks-root on touch/coarse-pointer devices; these rules make the D-pad visible
-   and apply the compact game controls independently of iframe width.
-*/
-#ks-root.touch-ui #mobile-controls {
-    display: block !important;
-}
-
-#ks-root.touch-ui #game {
-    width: 96vw;
-    max-width: 100%;
-    border-width: 2px;
-    touch-action: none;
-}
-
-#ks-root.touch-ui #controls {
-    width: 98%;
-    gap: 6px;
-}
-
-#ks-root.touch-ui #controls button {
-    min-width: 0;
-    flex: 1 1 30%;
-    padding: 9px 6px;
-    font-size: 12px;
 }
 
 @media (max-width: 700px) {
@@ -1147,21 +1126,6 @@ if (
 }
 
 ROOT.dataset.ready = "1";
-
-/*
-   Detect touch-first devices directly instead of relying only on CSS viewport
-   width. Streamlit's component iframe can be wider than the actual phone
-   viewport, which previously kept the mobile D-pad hidden.
-*/
-const HAS_TOUCH_UI = Boolean(
-    (navigator.maxTouchPoints && navigator.maxTouchPoints > 0) ||
-    ("ontouchstart" in window) ||
-    (window.matchMedia && window.matchMedia("(pointer: coarse)").matches)
-);
-
-if (HAS_TOUCH_UI) {
-    ROOT.classList.add("touch-ui");
-}
 
 const CURRENT_USER = __CURRENT_USER_JSON__;
 const SUPABASE_URL = __SUPABASE_URL_JSON__;
@@ -4491,6 +4455,17 @@ const touchDirections = {
     "move-left": [0, -1],
     "move-right": [0, 1]
 };
+
+/* Extra mobile-visibility safety net. Some embedded browsers report an iframe
+   width larger than the phone screen, so width-only media queries are unreliable. */
+const mobileControls = document.getElementById("mobile-controls");
+const isTouchDevice = (
+    (navigator.maxTouchPoints && navigator.maxTouchPoints > 0) ||
+    (window.matchMedia && window.matchMedia("(pointer: coarse)").matches)
+);
+if (mobileControls && isTouchDevice) {
+    mobileControls.style.setProperty("display", "block", "important");
+}
 
 /*
    Use BOTH touch and pointer/click events.
