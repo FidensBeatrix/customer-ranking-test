@@ -1,1821 +1,4708 @@
-#region IMPORTS
-
-from io import BytesIO
-import hmac
-from zipfile import BadZipFile
-from pathlib import Path
-from datetime import datetime, timedelta
-from collections import defaultdict
-
+import json
 import streamlit as st
-from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Font, PatternFill, Alignment
-from openpyxl.utils import get_column_letter
-from PIL import Image, ImageDraw, ImageFont
+import streamlit.components.v1 as components
 
-#endregion IMPORTS
-
-
-#region APP CONFIGURATION
-
-APP_TITLE = "Customer Scoring - Web V24"
-BASE_DIR = Path(__file__).parent
-DATA_FILE = BASE_DIR / "Customer_Scoring.xlsx"
-ASSETS_DIR = BASE_DIR / "assets"
-
-SPINMASTER_LOGO_PATH = ASSETS_DIR / "SpinMaster-Logo-CMYK.png"
-PRIMAL_HATCH_IMAGE_PATH = ASSETS_DIR / "PrimalHatch_Jurassic_DinoFreedom-2025.png"
-PAW_HEADER_IMAGE_PATH = ASSETS_DIR / "PAW_CSG25_Grp_005_CGI.jpg"
-
-MAX_TOTAL = 15
-
-# Login accounts.
-# You can either fill these four values directly OR leave them blank and use
-# Streamlit Secrets with the same key names.
-# IMPORTANT: if this GitHub repository is shared/public, use Streamlit Secrets
-# instead of putting real passwords here.
-ADMIN_USERNAME = "Venitas"
-ADMIN_PASSWORD = "ResNonVerba"
-VIEW_USERNAME = "Spinmaster"
-VIEW_PASSWORD = "ReportAndAnalytics"
-
-AUTH_SESSION_VERSION = "v3-two-role-login"
-
-MONTH_WEEK_MAPPING = {
-    1:  [1, 2, 3, 4],
-    2:  [5, 6, 7, 8],
-    3:  [9, 10, 11, 12, 13],
-    4:  [14, 15, 16, 17],
-    5:  [18, 19, 20, 21],
-    6:  [22, 23, 24, 25, 26],
-    7:  [27, 28, 29, 30],
-    8:  [31, 32, 33, 34],
-    9:  [35, 36, 37, 38, 39],
-    10: [40, 41, 42, 43],
-    11: [44, 45, 46, 47],
-    12: [48, 49, 50, 51, 52],
-}
-
-MONTH_LABELS = [
-    "1 - January",
-    "2 - February",
-    "3 - March",
-    "4 - April",
-    "5 - May",
-    "6 - June",
-    "7 - July",
-    "8 - August",
-    "9 - September",
-    "10 - October",
-    "11 - November",
-    "12 - December",
-]
-
-CATEGORIES = [
-    (
-        "Timeliness",
-        "How reliably the customer sends the data on time.\n\n"
-        "0 = Missing / seriously late\n"
-        "1 = Often late\n"
-        "2 = Mostly on time, minor delays\n"
-        "3 = On time",
-    ),
-    (
-        "Layout Consistency",
-        "How stable and reusable the incoming file layout is.\n\n"
-        "0 = Major layout changes / difficult to process\n"
-        "1 = Frequent layout changes\n"
-        "2 = Mostly consistent, small changes\n"
-        "3 = Fully consistent",
-    ),
-    (
-        "Data Completeness",
-        "Whether the required POS / inventory / product information is present.\n\n"
-        "0 = Major information missing\n"
-        "1 = Several missing elements\n"
-        "2 = Mostly complete, minor gaps\n"
-        "3 = Complete",
-    ),
-    (
-        "Material Mapping",
-        "How cleanly customer materials can be matched to the correct #600.\n\n"
-        "0 = Major mapping problems\n"
-        "1 = Frequent manual mapping required\n"
-        "2 = Minor mapping issues\n"
-        "3 = Clean / accurate mapping",
-    ),
-    (
-        "Manual Effort",
-        "How much analyst work is needed before the data can be used.\n\n"
-        "0 = Very high manual effort\n"
-        "1 = High manual effort\n"
-        "2 = Some manual work needed\n"
-        "3 = Minimal manual effort",
-    ),
-]
-
-DEFAULT_CUSTOMERS = {
-    "UK": ["Amazon UK", "Argos", "ASDA", "B&M", "ENTERTAINER", "Sainsburys", "Smyths UK"],
-    "FR": ["Amazon FR", "Auchan FR", "Carrefour FR", "Cultura", "Distritoys", "Fnac FR", "Joueclub & Ludendo", "Leclerc", "Maxitoys", "Smyths FR"],
-    "GAS": ["Amazon DE", "Wave", "Karstad", "Kaufland", "Mueller", "Otto", "Rofu", "Rossmann", "Smyths DE", "Thalia", "Interspar", "Migros"],
-    "IBER": ["Amazon ES", "Alcampo", "Carrefour ES", "El Corte Ingles", "Fnac ES", "Toy Planet", "Toys r us", "El Corte Ingles Portugal", "Pingo Doce", "Sonae"],
-    "IT": ["Amazon IT", "Prenatal IT"],
-    "BNL": ["Amazon NL", "Amazon BE", "Bol.com", "LOBBES", "Intertoys", "Colruyt", "Dreamland", "Wehkamp"],
-    "GR": ["Enarxis", "Jumbo", "Max Stores", "Moustakas", "Perfect Toys", "Retail World"],
-    "CEE": ["Auchan HU", "Modell & Hobby", "Regio", "Spar", "Carrefour PL", "Amazon PL", "Smyk", "Auchan RO", "Carrefour RO", "Noriel/Intertoy", "Peaktoys", "Allegro", "Alza", "Sparkys", "Alltoys", "Framee", "TESCO CEE"],
-    "NORDICS": ["Lekia", "SG"],
-}
-
-# Amazon UK/FR/DE/ES/IT/NL are scored once as one combined customer.
-# The score-entry panel shows them only as AMAZON / Amazon.
-# The ranking expands that one score back into the normal reporting regions.
-SPECIAL_AMAZON_SCORE_REGION = "AMAZON"
-SPECIAL_AMAZON_SCORE_CUSTOMER = "Amazon"
-SPECIAL_AMAZON_REPORT_CUSTOMERS = {
-    "UK": "Amazon UK",
-    "FR": "Amazon FR",
-    "GAS": "Amazon DE",
-    "IBER": "Amazon ES",
-    "IT": "Amazon IT",
-    "BNL": "Amazon NL",
-}
-SPECIAL_AMAZON_CUSTOMER_NAMES = set(SPECIAL_AMAZON_REPORT_CUSTOMERS.values())
-
-
-def load_scoring_customer_master():
-    """Customer master used only by the scoring panel."""
-    master = load_customer_master()
-    scoring_master = {}
-
-    for region, entries in master.items():
-        scoring_master[region] = [
-            dict(entry)
-            for entry in entries
-            if entry["customer"] not in SPECIAL_AMAZON_CUSTOMER_NAMES
-        ]
-
-    scoring_master[SPECIAL_AMAZON_SCORE_REGION] = [{
-        "customer": SPECIAL_AMAZON_SCORE_CUSTOMER,
-        "frequency": "Weekly",
-    }]
-    return scoring_master
-
-
-DEFAULT_FREQUENCY = "Weekly"
-
-MONTHLY_CUSTOMERS = {
-    "Cultura",
-    "Carrefour FR",
-    "Leclerc",
-    "Interspar",
-    "Kaufland",
-    "Modell & Hobby",
-    "Carrefour PL",
-    "Auchan RO",
-    "Carrefour RO",
-    "Noriel/Intertoy",
-    "Peaktoys",
-}
-
-CATEGORY_COLORS = {
-    "Timeliness": "#20a8f0",
-    "Layout Consistency": "#f04a34",
-    "Data Completeness": "#9a5de8",
-    "Material Mapping": "#79c934",
-    "Manual Effort": "#f39a22",
-}
-
-#endregion APP CONFIGURATION
-
-
-#region REPORTING HELPERS
-
-def parse_month_value(value):
-    text = str(value or "").strip()
-    if not text:
-        raise ValueError("Month is empty.")
-    month = int(text.split("-", 1)[0].strip())
-    if month not in MONTH_WEEK_MAPPING:
-        raise ValueError("Month must be between 1 and 12.")
-    return month
-
-
-def weeks_for_month(month):
-    return list(MONTH_WEEK_MAPPING[month])
-
-
-def month_for_week(week):
-    for month, weeks in MONTH_WEEK_MAPPING.items():
-        if week in weeks:
-            return month
-    return 12
-
-
-def get_customer_frequency(region, customer):
-    if region == "GR":
-        return "Monthly"
-    if customer in MONTHLY_CUSTOMERS:
-        return "Monthly"
-    return "Weekly"
-
-
-def previous_reporting_month(year, month, offset=1):
-    """Move backwards by reporting months, handling year boundaries."""
-    y, m = year, month
-    for _ in range(offset):
-        m -= 1
-        if m < 1:
-            m = 12
-            y -= 1
-    return y, m
-
-
-def periods_for_reporting_month(year, month):
-    """Return ISO year/week tuples for one 4-4-5 reporting month."""
-    return [(year, w) for w in weeks_for_month(month)]
-
-
-def periods_for_last_months(anchor_year, anchor_week, count):
-    """Return all weeks belonging to the previous N reporting months."""
-    anchor_month = month_for_week(anchor_week)
-    month_keys = [
-        previous_reporting_month(anchor_year, anchor_month, offset)
-        for offset in range(count, 0, -1)
-    ]
-    periods = []
-    for y, m in month_keys:
-        periods.extend(periods_for_reporting_month(y, m))
-    return periods
-
-
-def reporting_month_key(year, week):
-    return year, month_for_week(week)
-
-
-def parse_custom_weeks(year, text):
-    text = (text or "").strip()
-    if not text:
-        return []
-
-    weeks = []
-
-    for part in text.split(","):
-        part = part.strip()
-        if not part:
-            continue
-
-        if "-" in part:
-            a, b = part.split("-", 1)
-            start_week = int(a.strip())
-            end_week = int(b.strip())
-
-            if start_week > end_week:
-                start_week, end_week = end_week, start_week
-
-            for w in range(start_week, end_week + 1):
-                datetime.fromisocalendar(year, w, 1)
-                weeks.append(w)
-        else:
-            w = int(part)
-            datetime.fromisocalendar(year, w, 1)
-            weeks.append(w)
-
-    return [(year, w) for w in sorted(set(weeks))]
-
-
-#endregion REPORTING HELPERS
-
-
-#region EXCEL DATA STORAGE
-
-def format_workbook(wb):
-    fill = PatternFill("solid", fgColor="243447")
-    hdr_font = Font(color="FFFFFF", bold=True)
-
-    for ws in wb.worksheets:
-        for c in ws[1]:
-            c.fill = fill
-            c.font = hdr_font
-            c.alignment = Alignment(horizontal="center")
-
-        ws.freeze_panes = "A2"
-
-        for col in range(1, ws.max_column + 1):
-            max_len = 0
-            for row in range(1, ws.max_row + 1):
-                v = ws.cell(row, col).value
-                if v is not None:
-                    max_len = max(max_len, len(str(v)))
-            ws.column_dimensions[get_column_letter(col)].width = min(max(max_len + 2, 11), 30)
-
-
-def ensure_workbook():
-    """Ensure the Excel database exists and is readable.
-
-    Returns (True, None) when ready. If an existing xlsx is damaged, the
-    function leaves it untouched and returns (False, error_message) so the
-    admin can replace it from the login-protected recovery screen.
+# ============================================================
+# SUPABASE CONFIG
+# ============================================================
+def get_supabase_public_config():
     """
-    if DATA_FILE.exists():
-        try:
-            test_wb = load_workbook(DATA_FILE, read_only=True, data_only=True)
-            test_wb.close()
-            sync_customer_master()
-            return True, None
-        except (BadZipFile, OSError, ValueError, KeyError) as exc:
-            return False, str(exc)
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Scores"
-    ws.append([
-        "Year", "Week", "Region", "Customer", "Frequency",
-        "Timeliness", "Layout Consistency", "Data Completeness",
-        "Material Mapping", "Manual Effort", "Total", "Life %", "Saved At"
-    ])
-
-    cws = wb.create_sheet("Customers")
-    cws.append(["Region", "Customer", "Frequency"])
-
-    for region, customers in DEFAULT_CUSTOMERS.items():
-        for customer in customers:
-            cws.append([region, customer, get_customer_frequency(region, customer)])
-
-    format_workbook(wb)
-    wb.save(DATA_FILE)
-    wb.close()
-    return True, None
-
-
-def sync_customer_master():
-    if not DATA_FILE.exists():
-        return
-
-    wb = load_workbook(DATA_FILE)
-
-    if "Customers" not in wb.sheetnames:
-        ws = wb.create_sheet("Customers")
-        ws.append(["Region", "Customer", "Frequency"])
-    else:
-        ws = wb["Customers"]
-
-    if ws.cell(1, 3).value != "Frequency":
-        ws.cell(1, 3).value = "Frequency"
-
-    existing = {}
-
-    for row_idx in range(2, ws.max_row + 1):
-        region = ws.cell(row_idx, 1).value
-        customer = ws.cell(row_idx, 2).value
-
-        if region and customer:
-            region = str(region)
-            customer = str(customer)
-            existing[(region, customer)] = row_idx
-            ws.cell(row_idx, 3).value = get_customer_frequency(region, customer)
-
-    for region, customers in DEFAULT_CUSTOMERS.items():
-        for customer in customers:
-            if (region, customer) not in existing:
-                ws.append([region, customer, get_customer_frequency(region, customer)])
-
-    format_workbook(wb)
-    wb.save(DATA_FILE)
-    wb.close()
-
-
-def replace_data_file(uploaded_file):
-    DATA_FILE.write_bytes(uploaded_file.getvalue())
-    ensure_workbook()
-
-
-def load_customer_master():
-    ensure_workbook()
-
-    wb = load_workbook(DATA_FILE, data_only=True)
-    ws = wb["Customers"]
-    data = defaultdict(list)
-
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        region, customer = row[0], row[1]
-
-        if not region or not customer:
-            continue
-
-        region = str(region)
-        customer = str(customer)
-
-        data[region].append({
-            "customer": customer,
-            "frequency": get_customer_frequency(region, customer),
-        })
-
-    wb.close()
-    return dict(data)
-
-
-def get_saved_customers_for_period(year, weeks):
-    ensure_workbook()
-
-    if isinstance(weeks, int):
-        weeks = [weeks]
-
-    weeks = set(weeks)
-
-    wb = load_workbook(DATA_FILE, data_only=True)
-    ws = wb["Scores"]
-    saved_by_customer = defaultdict(set)
-
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        if not row or row[0] is None:
-            continue
-
-        row_year = row[0]
-        row_week = row[1]
-        customer = row[3]
-
-        if row_year == year and row_week in weeks and customer:
-            saved_by_customer[str(customer)].add(int(row_week))
-
-    wb.close()
-
-    # For a monthly selection, show complete only if the customer has every week.
-    return {
-        customer
-        for customer, saved_weeks in saved_by_customer.items()
-        if weeks.issubset(saved_weeks)
-    }
-
-
-def get_last_saved_period():
-    ensure_workbook()
-
-    wb = load_workbook(DATA_FILE, data_only=True)
-    ws = wb["Scores"]
-    periods = []
-
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        if isinstance(row[0], int) and isinstance(row[1], int):
-            periods.append((row[0], row[1]))
-
-    wb.close()
-
-    if periods:
-        return max(periods, key=lambda p: datetime.fromisocalendar(p[0], p[1], 1))
-
-    reporting_date = datetime.now() - timedelta(weeks=1)
-    iso = reporting_date.isocalendar()
-    return iso.year, iso.week
-
-
-def migrate_old_scores_if_needed(wb):
-    ws = wb["Scores"]
-    headers = [ws.cell(1, i).value for i in range(1, ws.max_column + 1)]
-
-    if "Frequency" in headers:
-        return
-
-    old_rows = list(ws.iter_rows(min_row=2, values_only=True))
-    old_index = wb.sheetnames.index("Scores")
-    wb.remove(ws)
-
-    nws = wb.create_sheet("Scores", old_index)
-    nws.append([
-        "Year", "Week", "Region", "Customer", "Frequency",
-        "Timeliness", "Layout Consistency", "Data Completeness",
-        "Material Mapping", "Manual Effort", "Total", "Life %", "Saved At"
-    ])
-
-    for row in old_rows:
-        if not row or row[0] is None:
-            continue
-
-        region = str(row[2])
-        customer = str(row[3])
-        freq = get_customer_frequency(region, customer)
-
-        nws.append([
-            row[0], row[1], row[2], row[3], freq,
-            row[4], row[5], row[6], row[7], row[8],
-            row[9], row[10], row[11]
-        ])
-
-
-def save_batch_to_excel(batch, year, week):
-    ensure_workbook()
-
-    wb = load_workbook(DATA_FILE)
-    migrate_old_scores_if_needed(wb)
-    ws = wb["Scores"]
-
-    existing = {}
-
-    for r in range(2, ws.max_row + 1):
-        y = ws.cell(r, 1).value
-        w = ws.cell(r, 2).value
-        customer = ws.cell(r, 4).value
-
-        if y is not None and w is not None and customer:
-            existing[(int(y), int(w), str(customer))] = r
-
-    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    for customer, item in batch.items():
-        s = item["scores"]
-        total = sum(s.values())
-
-        values = [
-            year,
-            week,
-            item["region"],
-            customer,
-            item["frequency"],
-            s["Timeliness"],
-            s["Layout Consistency"],
-            s["Data Completeness"],
-            s["Material Mapping"],
-            s["Manual Effort"],
-            total,
-            total / MAX_TOTAL,
-            stamp,
-        ]
-
-        key = (year, week, customer)
-
-        if key in existing:
-            rr = existing[key]
-            for cc, value in enumerate(values, start=1):
-                ws.cell(rr, cc).value = value
-        else:
-            ws.append(values)
-
-    for r in range(2, ws.max_row + 1):
-        ws.cell(r, 12).number_format = "0%"
-
-    format_workbook(wb)
-    wb.save(DATA_FILE)
-    wb.close()
-
-
-def load_all_scores():
-    ensure_workbook()
-
-    wb = load_workbook(DATA_FILE, data_only=True)
-    ws = wb["Scores"]
-    headers = [ws.cell(1, i).value for i in range(1, ws.max_column + 1)]
-    has_freq = "Frequency" in headers
-    records = []
-
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        if not row or row[0] is None:
-            continue
-
-        if has_freq:
-            freq = row[4] or DEFAULT_FREQUENCY
-            offset = 1
-        else:
-            freq = get_customer_frequency(str(row[2]), str(row[3]))
-            offset = 0
-
-        records.append({
-            "year": row[0],
-            "week": row[1],
-            "region": row[2],
-            "customer": row[3],
-            "frequency": str(freq).title(),
-            "scores": {
-                "Timeliness": row[4 + offset],
-                "Layout Consistency": row[5 + offset],
-                "Data Completeness": row[6 + offset],
-                "Material Mapping": row[7 + offset],
-                "Manual Effort": row[8 + offset],
-            },
-            "total": row[9 + offset],
-            "life": row[10 + offset],
-        })
-
-    wb.close()
-    return records
-
-
-def workbook_bytes():
-    ensure_workbook()
-    return DATA_FILE.read_bytes()
-
-
-#endregion EXCEL DATA STORAGE
-
-
-#region VISUAL DATA PREPARATION
-
-def periods_back(year, week, count=4):
-    """Return chronological ISO week periods ending at the selected week."""
-    current = datetime.fromisocalendar(year, week, 1)
-    result = []
-    for offset in range(count - 1, -1, -1):
-        d = current - timedelta(weeks=offset)
-        iso = d.isocalendar()
-        result.append((iso.year, iso.week))
-    return result
-
-
-def safe_number(value, default=0.0):
-    """Convert Excel/Streamlit values to float without crashing the ranking.
-
-    Handles blank cells, percentage text and Excel error strings such as
-    #N/A / #VALUE!. Invalid values are treated as the supplied default.
+    Return only the browser-safe Supabase connection values.
+
+    IMPORTANT:
+    - The publishable/anon key is safe to expose to the browser.
+    - A secret/service-role key must NEVER be injected into GAME_HTML.
     """
-    if value is None or value == "":
-        return default
-    if isinstance(value, (int, float)):
-        return float(value)
-    text = str(value).strip()
-    if not text or text.startswith("#"):
-        return default
     try:
-        if text.endswith("%"):
-            return float(text[:-1].replace(",", ".")) / 100.0
-        return float(text.replace(",", "."))
-    except (TypeError, ValueError):
-        return default
+        cfg = st.secrets["supabase"]
+        url = str(cfg.get("url", "")).strip()
 
+        public_key = str(
+            cfg.get("publishable_key", "")
+            or cfg.get("anon_key", "")
+        ).strip()
 
-def prepare_visual_rows(periods, region_filter, frequency_filter):
-    """Build ranking rows for the selected periods.
+        # Backward-compatible fallback only when `key` is already a
+        # browser-safe publishable/anon key. Never expose sb_secret_*.
+        if not public_key:
+            fallback = str(cfg.get("key", "")).strip()
+            if fallback and not fallback.startswith("sb_secret_"):
+                public_key = fallback
 
-    Weekly customers are averaged by available selected weeks. Monthly customers
-    are averaged by reporting month, so a 5-week month does not get more weight
-    than a 4-week month. Missing periods are ignored rather than scored as zero.
+        return url, public_key
+    except Exception:
+        return "", ""
+
+SUPABASE_URL, SUPABASE_PUBLIC_KEY = get_supabase_public_config()
+
+# ============================================================
+# PAGE CONFIG
+# ============================================================
+st.set_page_config(
+    page_title="Testing Game",
+    page_icon="🔵",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+# ============================================================
+# LOGIN
+# ============================================================
+def check_credentials(username: str, password: str) -> bool:
     """
-    records = load_all_scores()
-    wanted = set(periods)
-
-    # Expand one combined AMAZON / Amazon score back into the six reporting
-    # customers. If old individual Amazon scores exist for the same week, the
-    # combined score takes precedence to avoid duplicate report rows.
-    combined_amazon_periods = {
-        (r["year"], r["week"])
-        for r in records
-        if r["region"] == SPECIAL_AMAZON_SCORE_REGION
-        and r["customer"] == SPECIAL_AMAZON_SCORE_CUSTOMER
-    }
-
-    report_records = []
-    for r in records:
-        period_key = (r["year"], r["week"])
-
-        if r["customer"] in SPECIAL_AMAZON_CUSTOMER_NAMES and period_key in combined_amazon_periods:
-            continue
-
-        if (
-            r["region"] == SPECIAL_AMAZON_SCORE_REGION
-            and r["customer"] == SPECIAL_AMAZON_SCORE_CUSTOMER
-        ):
-            for report_region, report_customer in SPECIAL_AMAZON_REPORT_CUSTOMERS.items():
-                expanded = dict(r)
-                expanded["region"] = report_region
-                expanded["customer"] = report_customer
-                expanded["frequency"] = "Weekly"
-                expanded["scores"] = dict(r["scores"])
-                report_records.append(expanded)
-            continue
-
-        report_records.append(r)
-
-    filtered = []
-    for r in report_records:
-        if (r["year"], r["week"]) not in wanted:
-            continue
-        if region_filter != "All Regions" and r["region"] != region_filter:
-            continue
-        if frequency_filter != "All" and r["frequency"] != frequency_filter:
-            continue
-        filtered.append(r)
-
-    grouped = {}
-    for r in filtered:
-        key = (r["region"], r["customer"], r["frequency"])
-        grouped.setdefault(key, {
-            "region": r["region"],
-            "customer": r["customer"],
-            "frequency": r["frequency"],
-            "records": {},
-        })
-
-        if r["frequency"] == "Monthly":
-            period_key = reporting_month_key(r["year"], r["week"])
-        else:
-            period_key = (r["year"], r["week"])
-
-        grouped[key]["records"][period_key] = r
-
-    rows = []
-    selected_months = []
-    for y, w in periods:
-        key = reporting_month_key(y, w)
-        if key not in selected_months:
-            selected_months.append(key)
-
-    for g in grouped.values():
-        expected_keys = selected_months if g["frequency"] == "Monthly" else periods
-        available_records = [
-            g["records"][k]
-            for k in expected_keys
-            if k in g["records"]
-        ]
-        if not available_records:
-            continue
-
-        avg_life = sum(safe_number(r["life"]) for r in available_records) / len(available_records)
-        avg_scores = {}
-        for category, _tooltip in CATEGORIES:
-            values = [
-                safe_number(r["scores"].get(category))
-                for r in available_records
-                if r["scores"].get(category) is not None
-            ]
-            avg_scores[category] = sum(values) / len(values) if values else 0
-
-        rows.append({
-            "region": g["region"],
-            "customer": g["customer"],
-            "frequency": g["frequency"],
-            "life": avg_life,
-            "scores": avg_scores,
-            "available": len(available_records),
-            "selected_count": len(expected_keys),
-        })
-
-    rows.sort(key=lambda x: (-x["life"], x["customer"]))
-    return rows
-
-
-#endregion VISUAL DATA PREPARATION
-
-
-#region VISUAL RENDERING
-
-def life_color(percent):
-    if percent >= 90:
-        return "#49d70f"
-    if percent >= 75:
-        return "#a8dc12"
-    if percent >= 50:
-        return "#f6c313"
-    if percent >= 25:
-        return "#ef8014"
-    return "#e63824"
-
-
-def font(size, bold=False):
-    candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold
-        else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "C:/Windows/Fonts/arialbd.ttf" if bold
-        else "C:/Windows/Fonts/arial.ttf",
-        "C:/Windows/Fonts/segoeuib.ttf" if bold
-        else "C:/Windows/Fonts/segoeui.ttf",
-    ]
-
-    for p in candidates:
-        try:
-            return ImageFont.truetype(p, size)
-        except Exception:
-            pass
-
-    return ImageFont.load_default()
-
-
-def centered(draw, box, text, fnt, fill):
-    x1, y1, x2, y2 = box
-    b = draw.textbbox((0, 0), text, font=fnt)
-    tw = b[2] - b[0]
-    th = b[3] - b[1]
-
-    draw.text(
-        (x1 + (x2 - x1 - tw) / 2, y1 + (y2 - y1 - th) / 2 - 1),
-        text,
-        font=fnt,
-        fill=fill,
-    )
-
-
-def draw_score_dots(draw, x, y, score, color):
-    score = max(0.0, min(3.0, float(score or 0)))
-
-    for i in range(3):
-        cx = x + i * 22
-        left, top, right, bottom = cx - 7, y - 7, cx + 7, y + 7
-        local = max(0.0, min(1.0, score - i))
-
-        draw.ellipse(
-            (left, top, right, bottom),
-            fill="#18232d",
-            outline="#6d7a84",
-            width=2,
-        )
-
-        if local >= 0.999:
-            draw.ellipse(
-                (left, top, right, bottom),
-                fill=color,
-                outline="#d9f4ff",
-                width=2,
-            )
-        elif local > 0:
-            fill_right = left + int((right - left) * local)
-
-            draw.rectangle(
-                (left, top, fill_right, bottom),
-                fill=color,
-            )
-
-            draw.ellipse(
-                (left, top, right, bottom),
-                outline="#d9f4ff",
-                width=2,
-            )
-
-
-def render_ranking(rows, year, week, mode, periods, frequency_filter="All"):
-    width = 1160
-    top_h, header_h, row_h, footer_h = 155, 62, 48, 18
-    count = max(1, len(rows))
-    height = top_h + header_h + row_h * count + footer_h
-
-    img = Image.new("RGB", (width, height), "#07111d")
-    d = ImageDraw.Draw(img)
-
-    title = font(36, True)
-    sub = font(14, True)
-    hdr = font(12, True)
-    body = font(13, True)
-    small = font(9, False)
-    pctf = font(15, True)
-    rankf = font(18, True)
-
-    d.rectangle((0, 0, width, top_h), fill="#06131f")
-
-    if SPINMASTER_LOGO_PATH.exists():
-        try:
-            logo = Image.open(SPINMASTER_LOGO_PATH).convert("RGBA")
-            logo.thumbnail((125, 60), Image.LANCZOS)
-            img.paste(logo, (22, 25), logo)
-        except Exception:
-            pass
-
-    if PAW_HEADER_IMAGE_PATH.exists():
-        try:
-            paw = Image.open(PAW_HEADER_IMAGE_PATH).convert("RGBA")
-            paw.thumbnail((145, 80), Image.LANCZOS)
-            img.paste(paw, (width - paw.width - 20, 18), paw)
-        except Exception:
-            pass
-
-    centered(d, (180, 16, width - 180, 66), "CUSTOMER RANKING", title, "#ffc928")
-    view_label = mode.upper()
-
-    monthly_view = frequency_filter == "Monthly" and mode in ("Last Month", "Last 3 Months")
-
-    if monthly_view and periods:
-        month_keys = []
-        for period_year, period_week in periods:
-            key = reporting_month_key(period_year, period_week)
-            if key not in month_keys:
-                month_keys.append(key)
-
-        month_names = [label.split(" - ", 1)[1] for label in MONTH_LABELS]
-
-        if mode == "Last Month":
-            display_month_year, display_month = month_keys[-1]
-            period_heading = f"{month_names[display_month - 1]} / {display_month_year}"
-            summary = ""
-        else:
-            first_year, first_month = month_keys[0]
-            last_year, last_month = month_keys[-1]
-            if first_year == last_year:
-                period_heading = f"{month_names[first_month - 1]} - {month_names[last_month - 1]} / {last_year}"
-            else:
-                period_heading = (
-                    f"{month_names[first_month - 1]} / {first_year} - "
-                    f"{month_names[last_month - 1]} / {last_year}"
-                )
-            summary = "AVERAGE OF AVAILABLE MONTHLY SCORES • " + "  ".join(
-                f"{month_names[m - 1]} {y}" for y, m in month_keys
-            )
-
-        centered(d, (180, 70, width - 180, 101), f"{view_label}  •  {period_heading}", sub, "#f3f7fb")
-    else:
-        centered(d, (180, 70, width - 180, 101), f"{view_label}  •  W{week} / {year}", sub, "#f3f7fb")
-        if len(periods) == 1:
-            summary = ""
-        else:
-            period_text = "  ".join(f"{y}-W{w}" for y, w in periods)
-            if len(period_text) > 105:
-                period_text = f"{len(periods)} selected weeks ending {periods[-1][0]}-W{periods[-1][1]}"
-            summary = "AVERAGE OF AVAILABLE SCORES • " + period_text
-
-    if summary:
-        centered(d, (170, 108, width - 170, 136), summary, small, "#c7d8e5")
-
-    x_rank, w_rank = 12, 60
-    x_customer, w_customer = 72, 205
-    x_health, w_health = 277, 285
-    x_cat, cat_w = 562, 116
-    hy1, hy2 = top_h, top_h + header_h
-
-    d.rectangle((15, hy1, width - 15, hy2), outline="#2f6f8f", width=2)
-    centered(d, (x_rank, hy1, x_rank + w_rank, hy2), "RANK", hdr, "#f3f7fb")
-    centered(d, (x_customer, hy1, x_customer + w_customer, hy2), "CUSTOMER", hdr, "#f3f7fb")
-    centered(d, (x_health, hy1, x_health + w_health, hy2), "OVERALL HEALTH", hdr, "#f3f7fb")
-
-    cat_short = [
-        ("Timeliness", "TIMELINESS"),
-        ("Layout Consistency", "LAYOUT"),
-        ("Data Completeness", "DATA"),
-        ("Material Mapping", "MAPPING"),
-        ("Manual Effort", "EFFORT"),
-    ]
-
-    for i, (key, label) in enumerate(cat_short):
-        x1 = x_cat + i * cat_w
-        x2 = x_cat + (i + 1) * cat_w
-        d.rectangle((x1, hy1, x2, hy2), outline="#2f6f8f", width=2)
-        centered(d, (x1 + 3, hy1, x2 - 3, hy2), label, small, CATEGORY_COLORS[key])
-
-    start_y = hy2
-    if not rows:
-        centered(d, (0, start_y, width, start_y + row_h), "NO SCORES MATCH THE CURRENT FILTERS", body, "#9eb2c2")
-
-    for idx, r in enumerate(rows, start=1):
-        y1 = start_y + (idx - 1) * row_h
-        y2 = start_y + idx * row_h
-        d.rectangle((15, y1, width - 15, y2), fill="#091825" if idx % 2 else "#0c1e2d")
-
-        for x in [x_rank, x_customer, x_health, x_cat, x_cat + cat_w, x_cat + 2 * cat_w, x_cat + 3 * cat_w, x_cat + 4 * cat_w, x_cat + 5 * cat_w]:
-            d.line((x, y1, x, y2), fill="#2f6f8f", width=1)
-        d.line((15, y2, width - 15, y2), fill="#2f6f8f", width=1)
-
-        centered(d, (x_rank, y1, x_rank + w_rank, y2), str(idx), rankf, "#ffc928" if idx == 1 else "#dbe8f0")
-        d.text((x_customer + 10, y1 + 6), r["customer"], font=body, fill="#f3f7fb")
-        d.text((x_customer + 10, y1 + 27), f'{r["region"]} • {r["frequency"]}', font=small, fill="#9eb2c2")
-
-        life_pct = max(0, min(100, safe_number(r["life"]) * 100))
-        bx1, by1, bx2, by2 = x_health + 10, y1 + 10, x_health + 205, y1 + 32
-        d.rounded_rectangle((bx1, by1, bx2, by2), radius=6, fill="#061018", outline="#8cc8df", width=2)
-        fw = int((bx2 - bx1 - 6) * life_pct / 100)
-        if fw > 0:
-            d.rounded_rectangle((bx1 + 3, by1 + 3, bx1 + 3 + fw, by2 - 3), radius=4, fill=life_color(life_pct))
-        d.text((x_health + 218, y1 + 11), f"{life_pct:.0f}%", font=pctf, fill=life_color(life_pct))
-
-        scores = r["scores"] or {}
-        if len(periods) > 1:
-            d.text(
-                (x_health + 10, y1 + 34),
-                f'Based on {r["available"]}/{r["selected_count"]} available period(s)',
-                font=font(10),
-                fill="#9eb2c2",
-            )
-
-        for i, (key, _) in enumerate(cat_short):
-            x1 = x_cat + i * cat_w
-            score = safe_number(scores.get(key, 0))
-            draw_score_dots(d, x1 + 30, y1 + 20, score, CATEGORY_COLORS[key])
-
-            if len(periods) > 1:
-                centered(
-                    d,
-                    (x1 + 3, y1 + 30, x1 + cat_w - 3, y2 - 1),
-                    f"{score:.1f}/3",
-                    font(10, True),
-                    CATEGORY_COLORS[key],
-                )
-
-    return img
-
-
-def image_to_png_bytes(image):
-    buffer = BytesIO()
-    image.save(buffer, format="PNG")
-    return buffer.getvalue()
-
-
-#endregion VISUAL RENDERING
-
-
-#region STREAMLIT UI HELPERS
-
-def init_session_state():
-    reporting_date = datetime.now() - timedelta(weeks=1)
-    iso = reporting_date.isocalendar()
-
-    defaults = {
-        "pending_scores": {},
-        "year": int(iso.year),
-        "week": int(iso.week),
-        "month": month_for_week(int(iso.week)),
-        "region": "UK",
-        "customer": "",
-        "customer_search": "",
-        "rank_region": "All Regions",
-        "rank_frequency": "All",
-        "rank_mode": "Current Week",
-        "rank_custom_count": 6,
-        "rank_custom_unit": "Weeks",
-        "score_Timeliness": 3,
-        "score_Layout Consistency": 3,
-        "score_Data Completeness": 3,
-        "score_Material Mapping": 3,
-        "score_Manual Effort": 3,
-    }
-
-    for key, value in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
-
-
-def current_score_dict():
-    return {
-        category: int(st.session_state[f"score_{category}"])
-        for category, _ in CATEGORIES
-    }
-
-
-def pending_table_rows():
-    rows = []
-
-    for customer, item in st.session_state.pending_scores.items():
-        s = item["scores"]
-
-        rows.append({
-            "Region": item["region"],
-            "Customer": customer,
-            "Frequency": item["frequency"],
-            "Period": item["period_label"],
-            "Timeliness": s["Timeliness"],
-            "Layout": s["Layout Consistency"],
-            "Data": s["Data Completeness"],
-            "Mapping": s["Material Mapping"],
-            "Effort": s["Manual Effort"],
-            "Total": sum(s.values()),
-        })
-
-    return rows
-
-
-def selected_period_for_frequency(frequency):
-    year = int(st.session_state.year)
-
-    if frequency == "Monthly":
-        month = int(st.session_state.month)
-        return year, weeks_for_month(month), f"M{month}"
-
-    week = int(st.session_state.week)
-    datetime.fromisocalendar(year, week, 1)
-    return year, [week], f"W{week}"
-
-
-def selected_completed_customers(frequency):
-    year = int(st.session_state.year)
-
-    if frequency == "Monthly":
-        weeks = weeks_for_month(int(st.session_state.month))
-    else:
-        weeks = [int(st.session_state.week)]
-
-    return get_saved_customers_for_period(year, weeks)
-
-
-def add_current_customer_to_batch(region, customer):
-    if not customer:
-        st.warning("Select a customer first.")
-        return
-
-    frequency = get_customer_frequency(region, customer)
-    year, target_weeks, period_label = selected_period_for_frequency(frequency)
-
-    st.session_state.pending_scores[customer] = {
-        "region": region,
-        "frequency": frequency,
-        "scores": current_score_dict(),
-        "year": year,
-        "target_weeks": target_weeks,
-        "period_label": period_label,
-    }
-
-    st.success(f"{customer} added to pending batch.")
-
-
-def save_pending_batch():
-    if not st.session_state.pending_scores:
-        st.info("The pending batch is empty.")
+    Credentials are stored in Streamlit Secrets.
+    Example:
+    [auth.users]
+    Tester1 = "Blue"
+    """
+    try:
+        users = st.secrets["auth"]["users"]
+        return username in users and password == users[username]
+    except Exception:
         return False
 
-    grouped = {}
-
-    for customer, item in st.session_state.pending_scores.items():
-        year = item["year"]
-
-        for week in item["target_weeks"]:
-            key = (year, week)
-            grouped.setdefault(key, {})
-
-            grouped[key][customer] = {
-                "region": item["region"],
-                "frequency": item["frequency"],
-                "scores": item["scores"],
-            }
-
-    for (year, week), week_batch in grouped.items():
-        save_batch_to_excel(week_batch, year, week)
-
-    customer_count = len(st.session_state.pending_scores)
-    period_count = len(grouped)
-    st.session_state.pending_scores = {}
-
-    st.success(
-        f"{customer_count} customer score(s) saved to Excel. "
-        f"Week-periods written: {period_count}."
-    )
-
-    return True
-
-
-def inject_css():
+def show_login():
     st.markdown(
         """
         <style>
+        [data-testid="stSidebar"] {
+            display: none;
+        }
         .block-container {
-            max-width: 1450px;
-            padding-top: 1.2rem;
-            padding-bottom: 2rem;
+            padding-top: 2.2rem;
+            max-width: 920px;
         }
-
-        .sm-header {
-            background: #243447;
-            border-radius: 12px;
-            padding: 16px 20px;
-            margin-bottom: 14px;
-            color: white;
-        }
-
-        .sm-header h1 {
-            margin: 0;
-            font-size: 30px;
-            line-height: 1.1;
-        }
-
-        .sm-header span {
-            color: #9ec6e8;
-            font-size: 13px;
-            font-weight: 700;
-        }
-
-        .section-title {
-            font-size: 18px;
+        .login-title {
+            font-size: 2rem;
             font-weight: 800;
-            color: #243447;
-            margin-top: 4px;
-            margin-bottom: 8px;
+            margin-bottom: .15rem;
         }
-
-        div[data-testid="stMetric"] {
-            background: white;
-            border: 1px solid #e1e7ec;
-            border-radius: 12px;
-            padding: 8px 12px;
-        }
-
-        div[data-testid="stDataFrame"] {
-            border: 1px solid #dfe5ea;
-            border-radius: 10px;
+        .login-sub {
+            opacity: .72;
+            margin-bottom: 1rem;
         }
         </style>
         """,
         unsafe_allow_html=True,
     )
-
-
-#endregion STREAMLIT UI HELPERS
-
-
-#region AUTHENTICATION
-
-def _credential_value(name):
-    """Read a credential from app.py first, then Streamlit Secrets."""
-    local_value = globals().get(name, "")
-    if local_value not in (None, ""):
-        return str(local_value)
-
-    try:
-        if name in st.secrets:
-            return str(st.secrets[name])
-    except Exception:
-        pass
-
-    # Also support the older nested [auth] secrets format.
-    nested_names = {
-        "ADMIN_USERNAME": "admin_username",
-        "ADMIN_PASSWORD": "admin_password",
-        "VIEW_USERNAME": "viewer_username",
-        "VIEW_PASSWORD": "viewer_password",
-    }
-    try:
-        auth = st.secrets["auth"]
-        nested_key = nested_names[name]
-        if nested_key in auth:
-            return str(auth[nested_key])
-    except Exception:
-        pass
-
-    return ""
-
-
-def _configured_users():
-    """Return the two configured login accounts and their permissions."""
-    admin_username = _credential_value("ADMIN_USERNAME")
-    admin_password = _credential_value("ADMIN_PASSWORD")
-    view_username = _credential_value("VIEW_USERNAME")
-    view_password = _credential_value("VIEW_PASSWORD")
-
-    if not all((admin_username, admin_password, view_username, view_password)):
-        return None
-
-    return {
-        admin_username: {
-            "password": admin_password,
-            "role": "admin",
-            "label": "Full access",
-        },
-        view_username: {
-            "password": view_password,
-            "role": "viewer",
-            "label": "Ranking only",
-        },
-    }
-
-def require_login():
-    """Show a login screen and stop the app until the user is authenticated."""
-    # A version key prevents an old single-login Streamlit session from silently
-    # bypassing this new two-role login after a deployment.
-    if st.session_state.get("auth_session_version") != AUTH_SESSION_VERSION:
-        for key in ("authenticated", "auth_role", "auth_username", "logged_in"):
-            st.session_state.pop(key, None)
-        st.session_state.auth_session_version = AUTH_SESSION_VERSION
-
-    if st.session_state.get("authenticated"):
-        return st.session_state.get("auth_role", "viewer")
-
-    users = _configured_users()
-
-    st.markdown("<div style='height:7vh'></div>", unsafe_allow_html=True)
-    left, center, right = st.columns([1.25, 1, 1.25])
-
-    with center:
-        if SPINMASTER_LOGO_PATH.exists():
-            st.image(str(SPINMASTER_LOGO_PATH), use_container_width=True)
-
-        st.markdown("## Customer Scoring")
-        st.caption("Sign in to continue")
-
-        if not users:
-            st.error("Login credentials are not configured in Streamlit Secrets.")
-            st.code(
-                'ADMIN_USERNAME = "your-admin-name"\n'
-                'ADMIN_PASSWORD = "your-admin-password"\n'
-                'VIEW_USERNAME = "your-view-name"\n'
-                'VIEW_PASSWORD = "your-view-password"',
-                language="toml",
+    left, right = st.columns(
+        [1.35, 1],
+        vertical_alignment="center"
+    )
+    with left:
+        st.markdown(
+            '<div class="login-title">🔵 Testing Game</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<div class="login-sub">'
+            'For the game to begin please sign in'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        with st.form(
+            "login_form",
+            clear_on_submit=False
+        ):
+            username = st.text_input(
+                "Username",
+                placeholder="Username"
             )
-            st.stop()
-
-        with st.form("login_form", clear_on_submit=False):
-            username = st.text_input("Username")
-            password = st.text_input("Password", type="password")
-            submitted = st.form_submit_button("LOG IN", type="primary", use_container_width=True)
-
+            password = st.text_input(
+                "Password",
+                type="password",
+                placeholder="Password"
+            )
+            submitted = st.form_submit_button(
+                "LOGIN",
+                use_container_width=True
+            )
         if submitted:
-            account = users.get(username.strip())
-            password_ok = (
-                account is not None
-                and hmac.compare_digest(password, account["password"])
-            )
-
-            if password_ok:
-                st.session_state.authenticated = True
-                st.session_state.auth_role = account["role"]
-                st.session_state.auth_username = username.strip()
+            if check_credentials(username, password):
+                st.session_state["authenticated"] = True
+                st.session_state["username"] = username
                 st.rerun()
             else:
-                st.error("Wrong username or password.")
-
+                st.error(
+                    "🦖 RAWR... wrong username or password. "
+                    "No castle hunting for impostors."
+                )
+    with right:
+        try:
+            st.image(
+                "RATeamLogo.png",
+                use_container_width=True
+            )
+        except Exception:
+            st.info(
+                "Add **RATeamLogo.png** to the same "
+                "GitHub folder as `app.py`."
+            )
     st.stop()
 
+if not st.session_state.get(
+    "authenticated",
+    False
+):
+    show_login()
 
-def logout():
-    for key in ("authenticated", "auth_role", "auth_username"):
-        st.session_state.pop(key, None)
-    st.rerun()
+# ============================================================
+# LOGGED-IN HEADER
+# ============================================================
+head_left, head_right = st.columns(
+    [5, 1],
+    vertical_alignment="center"
+)
+with head_left:
+
+    st.caption(
+        f"Logged in as "
+        f"**{st.session_state.get('username', '')}**"
+    )
+
+with head_right:
+    if st.button(
+        "Log out",
+        use_container_width=True
+    ):
+        st.session_state.clear()
+        st.rerun()
+# ============================================================
+# GAME
+# ============================================================
+GAME_HTML = r"""
+<div id="ks-root" tabindex="0">
+<style>
+#ks-root {
+    width: 100%;
+    outline: none;
+    color: #f8fafc;
+    font-family:
+        Arial,
+        Helvetica,
+        sans-serif;
+}
+#ks-wrap {
+    max-width: 900px;
+    margin: 0 auto;
+}
+
+/* =========================
+   PLAYER SCOREBOARD
+   ========================= */
+
+#all-player-scoreboard {
+    width: min(650px, 94%);
+    margin: 4px auto 16px auto;
+    background: #111827;
+    border: 2px solid #7c3aed;
+    border-radius: 10px;
+    padding: 10px 14px;
+    box-sizing: border-box;
+}
+
+.all-score-title {
+    color: #ffd166;
+    font-size: 15px;
+    font-weight: 900;
+    text-align: center;
+    margin-bottom: 7px;
+}
+
+.all-score-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+    color: #f8fafc;
+}
+
+.all-score-table th,
+.all-score-table td {
+    padding: 5px 4px;
+    text-align: center;
+    border-bottom: 1px solid #334155;
+}
+
+.all-score-table th:first-child,
+.all-score-table td:first-child {
+    text-align: left;
+}
+
+.all-score-table th {
+    color: #93c5fd;
+    font-weight: 900;
+}
+
+.all-score-table tr:last-child td {
+    border-bottom: 0;
+}
+
+/* =========================
+   INTRO
+   ========================= */
+#intro-panel {
+    max-width: 820px;
+    margin:
+        28px auto
+        18px auto;
+    padding:
+        30px 34px;
+    border:
+        2px solid
+        #7c3aed;
+    border-radius:
+        14px;
+    background:
+        #111827;
+    text-align:
+        center;
+    line-height:
+        1.65;
+    font-size:
+        17px;
+}
+#intro-title {
+    color:
+        #ffd166;
+    font-size:
+        27px;
+    font-weight:
+        900;
+    margin-bottom:
+        18px;
+}
+#intro-text {
+    color:
+        #f8fafc;
+    font-size:
+        17px;
+}
+
+#start-game {
+    margin-top:
+        22px;
+    min-width:
+        210px;
+    border:
+        0;
+    border-radius:
+        9px;
+    padding:
+        12px 18px;
+    font-size:
+        16px;
+
+    font-weight:
+        900;
+
+    color:
+        white;
+
+    background:
+        #7c3aed;
+
+    cursor:
+        pointer;
+}
+
+#start-game:hover {
+
+    background:
+        #5b21b6;
+}
+
+#intro-buttons {
+    margin-top: 22px;
+    display: flex;
+    justify-content: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+#intro-buttons #start-game,
+#intro-buttons #help-game {
+    margin-top: 0;
+}
+
+#help-game {
+    min-width: 150px;
+    border: 2px solid #7c3aed;
+    border-radius: 9px;
+    padding: 10px 16px;
+    font-size: 15px;
+    font-weight: 900;
+    color: #7c3aed;
+    background: white;
+    cursor: pointer;
+}
+
+#help-game:hover {
+    background: #f3e8ff;
+}
+
+/* Help pop-up */
+#help-modal {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(2, 6, 23, 0.72);
+    z-index: 9999;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    box-sizing: border-box;
+}
+
+#help-card {
+    width: min(620px, 92vw);
+    background: #111827;
+    border: 2px solid #7c3aed;
+    border-radius: 14px;
+    padding: 24px 26px;
+    color: #f8fafc;
+    text-align: left;
+    box-shadow: 0 18px 50px rgba(0,0,0,.35);
+}
+
+#help-card h3 {
+    margin: 0 0 14px 0;
+    color: #ffd166;
+    text-align: center;
+    font-size: 24px;
+}
+
+#help-card p {
+    margin: 9px 0;
+    line-height: 1.55;
+    font-size: 15px;
+}
+
+#help-card strong {
+    color: #93c5fd;
+}
+
+#close-help {
+    display: block;
+    margin: 18px auto 0;
+    min-width: 140px;
+    border: 0;
+    border-radius: 8px;
+    padding: 10px 15px;
+    background: #7c3aed;
+    color: white;
+    font-weight: 900;
+    cursor: pointer;
+}
+
+#close-help:hover {
+    background: #5b21b6;
+}
+
+/* =========================
+   GAME HEADER
+   ========================= */
+
+#ks-header {
+
+    text-align:
+        center;
+
+    margin:
+        2px 0
+        8px 0;
+}
+
+#ks-title {
+
+    font-size:
+        25px;
+
+    font-weight:
+        900;
+
+    color:
+        #ffd166;
+
+    letter-spacing:
+        .5px;
+}
+
+#ks-status {
+
+    font-size:
+        14px;
+
+    font-weight:
+        700;
+
+    margin-top:
+        4px;
+    color:black;
+}
+
+#ks-letters {
+
+    font-size:
+        18px;
+
+    font-weight:
+        900;
+
+    color:
+        #7dd3fc;
+
+    margin-top:
+        4px;
+
+    margin-bottom:
+        5px;
+
+    letter-spacing:
+        6px;
+}
+
+/* =========================
+   GAME CANVAS
+   ========================= */
+
+#game-shell {
+
+    position:
+        relative;
+
+    width:
+        100%;
+
+    border-radius:
+        8px;
+
+    overflow:
+        hidden;
+}
+
+#game {
+
+    display:
+        block;
+
+    margin:
+        0 auto;
+
+    background:
+        #050816;
+
+    border:
+        3px solid
+        #6d28d9;
+
+    /*
+       Original canvas is still
+       1230 × 750 internally.
+
+       We only SCALE its display
+       size, so collision logic and
+       movement remain untouched.
+    */
+
+    width:
+        min(780px, 88vw);
+
+    max-width:
+        100%;
+
+    height:
+        auto;
+}
+
+/* =========================
+   BUTTONS
+   ========================= */
+
+#controls {
+
+    margin:
+        8px auto 0;
+
+    max-width:
+        860px;
+
+    display:
+        flex;
+
+    justify-content:
+        center;
+
+    gap:
+        10px;
+
+    flex-wrap:
+        wrap;
+}
+
+#controls button {
+
+    min-width:
+        150px;
+
+    border:
+        0;
+
+    border-radius:
+        8px;
+
+    padding:
+        8px 12px;
+
+    font-size:
+        14px;
+
+    font-weight:
+        800;
+
+    color:
+        white;
+
+    background:
+        #7c3aed;
+
+    cursor:
+        pointer;
+}
+
+#controls button:hover {
+
+    background:
+        #5b21b6;
+}
+
+#help {
+
+    text-align:
+        center;
+
+    opacity:
+        .78;
+
+    margin-top:
+        6px;
+
+    font-size:
+        12px;
+}
+
+/* =========================
+   GUESS PANEL
+   ========================= */
+
+#guess-panel {
+
+    display:
+        none;
+
+    max-width:
+        620px;
+
+    margin:
+        10px auto 0;
+
+    border:
+        2px solid
+        #ffd166;
+
+    background:
+        #111827;
+
+    border-radius:
+        10px;
+
+    padding:
+        14px;
+
+    text-align:
+        center;
+}
+
+#guess-panel h3 {
+
+    margin:
+        0 0 8px;
+
+    color:
+        #ffd166;
+}
+
+#guess-panel input {
+
+    width:
+        min(360px, 88%);
+
+    padding:
+        10px 12px;
+
+    border-radius:
+        7px;
+
+    border:
+        1px solid
+        #475569;
+
+    background:
+        #020617;
+
+    color:
+        white;
+
+    font-size:
+        17px;
+
+    text-align:
+        center;
+}
+
+#guess-panel button {
+
+    margin-left:
+        8px;
+
+    padding:
+        10px 15px;
+
+    border:
+        0;
+
+    border-radius:
+        7px;
+
+    color:
+        white;
+
+    background:
+        #2563eb;
+
+    font-weight:
+        800;
+
+    cursor:
+        pointer;
+}
+
+#guess-feedback {
+
+    min-height:
+        24px;
+
+    margin-top:
+        10px;
+
+    font-weight:
+        800;
+}
 
 
-#endregion AUTHENTICATION
+/* =========================
+   MOBILE TOUCH CONTROLS
+   ========================= */
+#mobile-controls {
+    display: none;
+    margin: 10px auto 4px;
+    width: 210px;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+}
+
+.mobile-pad {
+    display: grid;
+    grid-template-columns: 64px 64px 64px;
+    grid-template-rows: 58px 58px 58px;
+    gap: 6px;
+    justify-content: center;
+}
+
+.mobile-move {
+    border: 0;
+    border-radius: 14px;
+    background: #7c3aed;
+    color: white;
+    font-size: 27px;
+    font-weight: 900;
+    line-height: 1;
+    box-shadow: 0 4px 0 #4c1d95;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.mobile-move:active,
+.mobile-move.pressed {
+    transform: translateY(3px);
+    box-shadow: 0 1px 0 #4c1d95;
+    background: #5b21b6;
+}
+
+#move-up { grid-column: 2; grid-row: 1; }
+#move-left { grid-column: 1; grid-row: 2; }
+#move-down { grid-column: 2; grid-row: 2; }
+#move-right { grid-column: 3; grid-row: 2; }
+
+#mobile-hint {
+    text-align: center;
+    font-size: 11px;
+    opacity: .72;
+    margin-top: 7px;
+}
+
+@media (max-width: 700px) {
+
+    #ks-wrap {
+        width: 100%;
+        padding: 0 2px;
+        box-sizing: border-box;
+    }
+
+    #all-player-scoreboard {
+        width: 98%;
+        padding: 8px;
+        margin-bottom: 10px;
+    }
+
+    .all-score-table {
+        font-size: 10px;
+    }
+
+    #intro-panel {
+        margin: 10px auto;
+        padding: 18px 14px;
+        font-size: 15px;
+    }
+
+    #intro-title {
+        font-size: 22px;
+        margin-bottom: 10px;
+    }
+
+    #intro-text {
+        font-size: 15px;
+        line-height: 1.5;
+    }
+
+    #game {
+        width: 96vw;
+        max-width: 100%;
+        border-width: 2px;
+        touch-action: none;
+    }
+
+    #controls {
+        width: 98%;
+        gap: 6px;
+    }
+
+    #controls button {
+        min-width: 0;
+        flex: 1 1 30%;
+        padding: 9px 6px;
+        font-size: 12px;
+    }
+
+    #mobile-controls {
+        display: block;
+    }
+
+    #help {
+        font-size: 11px;
+        margin-top: 7px;
+    }
+
+    #help-card {
+        width: 94vw;
+        max-height: 86vh;
+        overflow-y: auto;
+        padding: 18px 16px;
+    }
+
+    #ks-title {
+
+        font-size:
+            20px;
+    }
+
+    #ks-status {
+
+        font-size:
+            12px;
+    }
+
+    #ks-letters {
+
+        font-size:
+            15px;
+
+        letter-spacing:
+            3px;
+    }
+
+    #guess-panel button {
+
+        margin:
+            8px 0 0;
+
+        width:
+            88%;
+    }
+
+}
+
+</style>
+
+<div id="ks-wrap">
+
+<div id="all-player-scoreboard">
+    <div class="all-score-title">🏆 Player scoreboard</div>
+    <table class="all-score-table">
+        <thead>
+            <tr>
+                <th>Player</th>
+                <th>Games</th>
+                <th>Wins</th>
+                <th>Words</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>Bubbly</td>
+                <td id="all-Bubbly-games">0</td>
+                <td id="all-Bubbly-wins">0</td>
+                <td id="all-Bubbly-words">0/3</td>
+            </tr>
+            <tr>
+                <td>Tester1</td>
+                <td id="all-Tester1-games">0</td>
+                <td id="all-Tester1-wins">0</td>
+                <td id="all-Tester1-words">0/3</td>
+            </tr>
+            <tr>
+                <td>Tester2</td>
+                <td id="all-Tester2-games">0</td>
+                <td id="all-Tester2-wins">0</td>
+                <td id="all-Tester2-words">0/3</td>
+            </tr>
+            <tr>
+                <td>Tester3</td>
+                <td id="all-Tester3-games">0</td>
+                <td id="all-Tester3-wins">0</td>
+                <td id="all-Tester3-words">0/3</td>
+            </tr>
+            <tr>
+                <td>Tester4</td>
+                <td id="all-Tester4-games">0</td>
+                <td id="all-Tester4-wins">0</td>
+                <td id="all-Tester4-words">0/3</td>
+            </tr>
+        </tbody>
+    </table>
+</div>
+
+</div>
+
+<!-- ======================================================
+     INTRO SCREEN
+     ====================================================== -->
+
+<div id="intro-panel">
+
+    <div id="intro-title">
+        🏰 Welcome, Castle Explorer!
+    </div>
+
+    <div id="intro-text">
+
+        Welcome to the ultimate prehistoric spell-off,
+        where you run around collecting castles to snag
+        secret letters and solve a hidden word!
+
+        <br><br>
+
+        Sounds simple, right?
+
+        <br><br>
+
+        Except there's a hungry dinosaur hot on your tail,
+        fully convinced that
+        &quot;legendary castle explorer&quot;
+        is the top item on today's lunch menu.
+
+    </div>
+
+    <div id="intro-buttons">
+        <button id="start-game">
+            START GAME
+        </button>
+
+        <button id="help-game">
+            HELP
+        </button>
+    </div>
+
+</div>
+
+<div id="help-modal">
+    <div id="help-card">
+        <h3>🎮 How to play</h3>
+
+        <p>
+            You are the <strong>green dog</strong>.
+            Your job is to explore the playground while the
+            <strong>red dinosaur</strong> chases you.
+        </p>
+
+        <p>
+            Around the maze you will find <strong> castles</strong>.
+            Walk into a castle to collect it and reveal one hidden character.
+        </p>
+
+        <p>
+            The playground also contains <strong>portals</strong>.
+            Matching letters show which portal connects to which.
+            <strong>Purple = IN</strong> and <strong>blue = OUT</strong>.
+        </p>
+
+        <p>
+            After you visit every castle, you will be asked to solve the secret.
+            The answer can be a <strong>word</strong>, a <strong>phrase</strong>,
+            or a <strong>name</strong>.
+        </p>
+
+        <p>
+            Move with <strong>Arrow Keys</strong> or <strong>WASD</strong>.
+            Press <strong>SPACE</strong> to pause or resume.
+        </p>
+
+        <button id="close-help">
+            GOT IT
+        </button>
+    </div>
+</div>
+
+<!-- ======================================================
+     GAME AREA
+     ====================================================== -->
+
+<div
+    id="game-area"
+    style="display:none;"
+>
+
+<div id="ks-header">
+
+    <div id="ks-title">
+        🏖️ Game Testing 🏰
+    </div>
+
+    <div id="ks-status">
+    </div>
+
+    <div id="ks-letters">
+    </div>
+
+</div>
+
+<div id="game-shell">
+
+    <canvas id="game">
+    </canvas>
+
+</div>
+
+<div id="controls">
+
+    <button id="restart">
+        Restart Game
+    </button>
+
+    <button id="pause">
+        Pause / Resume (SPACE)
+    </button>
+
+    <button id="help-game-live">
+        Help
+    </button>
+
+</div>
+
+<div id="mobile-controls" aria-label="Mobile movement controls">
+    <div class="mobile-pad">
+        <button class="mobile-move" id="move-up" aria-label="Move up">▲</button>
+        <button class="mobile-move" id="move-left" aria-label="Move left">◀</button>
+        <button class="mobile-move" id="move-down" aria-label="Move down">▼</button>
+        <button class="mobile-move" id="move-right" aria-label="Move right">▶</button>
+    </div>
+    <div id="mobile-hint">Tap the arrows or swipe directly on the playground</div>
+</div>
+
+<div id="help">
+
+    Move with Arrow Keys / WASD / touch controls
+    • SPACE pauses
+    • Purple portal = IN
+    • Blue portal = OUT
+
+</div>
+
+<div id="guess-panel">
+
+    <h3>
+        🦖😢 NOOO! YOU GOT ALL THE CASTLES!
+    </h3>
+
+    <div id="guess-text">
+        My snack escaped...
+        Fine. Guess the word or phrase!
+    </div>
+
+    <div
+        id="guess-rule"
+        style="
+            margin-top:8px;
+            font-weight:800;
+            color:#f8fafc;
+        "
+    >
+    </div>
+
+    <div
+        style="
+            margin:10px 0;
+            font-weight:800
+        "
+        id="found-letters"
+    >
+    </div>
+
+    <input
+        id="guess-input"
+        maxlength="40"
+        placeholder="Type the hidden word or phrase..."
+    />
+
+    <button id="guess-button">
+        GUESS
+    </button>
+
+    <div id="guess-feedback">
+    </div>
+
+</div>
+
+</div>
+
+</div>
+
+<script>
+
+(() => {
+
+/* ============================================================
+   SETUP
+   ============================================================ */
+
+const ROOT =
+    document.getElementById(
+        "ks-root"
+    );
+
+if (
+    ROOT.dataset.ready === "1"
+) {
+    return;
+}
+
+ROOT.dataset.ready = "1";
+
+const CURRENT_USER = __CURRENT_USER_JSON__;
+const SUPABASE_URL = __SUPABASE_URL_JSON__;
+const SUPABASE_PUBLIC_KEY = __SUPABASE_PUBLIC_KEY_JSON__;
+
+const KNOWN_PLAYERS = [
+    "Bubbly",
+    "Tester1",
+    "Tester2",
+    "Tester3",
+    "Tester4"
+];
+
+function emptyStats() {
+    return { games: 0, wins: 0, winningWords: [] };
+}
+
+function normaliseStats(row) {
+    return {
+        games: Number(row?.games || 0),
+        wins: Number(row?.wins || 0),
+        winningWords: Array.isArray(row?.solved_words)
+            ? row.solved_words
+            : []
+    };
+}
+
+let playerStats = emptyStats();
+let allPlayerStats = {};
+let supabaseReady = Boolean(SUPABASE_URL && SUPABASE_PUBLIC_KEY);
+let initialStatsLoaded = false;
+let initialStatsPromise = null;
+
+function supabaseHeaders(extra = {}) {
+    return {
+        // New Supabase publishable keys belong in the apikey header.
+        "apikey": SUPABASE_PUBLIC_KEY,
+        ...extra
+    };
+}
+
+async function fetchAllPlayerStats() {
+    if (!supabaseReady) return {};
+
+    const response = await fetch(
+        `${SUPABASE_URL}/rest/v1/game_stats?select=username,games,wins,solved_words`,
+        {
+            method: "GET",
+            headers: supabaseHeaders({
+                "Accept": "application/json"
+            })
+        }
+    );
+
+    if (!response.ok) {
+        throw new Error(`Supabase read failed: ${response.status}`);
+    }
+
+    const rows = await response.json();
+    const result = {};
+
+    for (const row of rows) {
+        result[row.username] = normaliseStats(row);
+    }
+
+    return result;
+}
+
+async function ensurePlayerStatsLoaded() {
+    if (initialStatsLoaded) return;
+
+    if (!initialStatsPromise) {
+        initialStatsPromise = (async () => {
+            try {
+                const remoteStats = await fetchAllPlayerStats();
+                allPlayerStats = remoteStats;
+
+                if (allPlayerStats[CURRENT_USER]) {
+                    playerStats = {
+                        games: allPlayerStats[CURRENT_USER].games,
+                        wins: allPlayerStats[CURRENT_USER].wins,
+                        winningWords: [
+                            ...allPlayerStats[CURRENT_USER].winningWords
+                        ]
+                    };
+                }
+            } catch (err) {
+                console.error(err);
+            } finally {
+                initialStatsLoaded = true;
+            }
+        })();
+    }
+
+    await initialStatsPromise;
+}
+
+async function updateAllPlayerScoreboard() {
+    try {
+        const remoteStats = await fetchAllPlayerStats();
+
+        if (Object.keys(remoteStats).length) {
+            allPlayerStats = remoteStats;
+        }
+        initialStatsLoaded = true;
+
+        if (allPlayerStats[CURRENT_USER]) {
+            playerStats = {
+                games: allPlayerStats[CURRENT_USER].games,
+                wins: allPlayerStats[CURRENT_USER].wins,
+                winningWords: [...allPlayerStats[CURRENT_USER].winningWords]
+            };
+        }
+    } catch (err) {
+        console.error(err);
+    }
+
+    for (const username of KNOWN_PLAYERS) {
+        const stats = allPlayerStats[username] || emptyStats();
+
+        const gamesEl = document.getElementById(
+            `all-${username}-games`
+        );
+        const winsEl = document.getElementById(
+            `all-${username}-wins`
+        );
+        const wordsEl = document.getElementById(
+            `all-${username}-words`
+        );
+
+        if (gamesEl) gamesEl.textContent = stats.games;
+        if (winsEl) winsEl.textContent = stats.wins;
+        if (wordsEl) {
+            wordsEl.textContent =
+                `${stats.winningWords.length}/${WORD_OPTIONS.length}`;
+        }
+    }
+}
+
+function updateScoreboard() {
+    updateAllPlayerScoreboard();
+}
+
+async function savePlayerStats() {
+    allPlayerStats[CURRENT_USER] = {
+        games: playerStats.games,
+        wins: playerStats.wins,
+        winningWords: [...playerStats.winningWords]
+    };
+
+    // Update the UI immediately, then persist online.
+    for (const username of KNOWN_PLAYERS) {
+        const stats = allPlayerStats[username] || emptyStats();
+        const gamesEl = document.getElementById(`all-${username}-games`);
+        const winsEl = document.getElementById(`all-${username}-wins`);
+        const wordsEl = document.getElementById(`all-${username}-words`);
+
+        if (gamesEl) gamesEl.textContent = stats.games;
+        if (winsEl) winsEl.textContent = stats.wins;
+        if (wordsEl) {
+            wordsEl.textContent =
+                `${stats.winningWords.length}/${WORD_OPTIONS.length}`;
+        }
+    }
+
+    if (!supabaseReady) {
+        console.error("Supabase is not configured.");
+        return;
+    }
+
+    try {
+        const response = await fetch(
+            `${SUPABASE_URL}/rest/v1/game_stats?on_conflict=username`,
+            {
+                method: "POST",
+                headers: supabaseHeaders({
+                    "Content-Type": "application/json",
+                    "Prefer": "resolution=merge-duplicates,return=representation"
+                }),
+                body: JSON.stringify({
+                    username: CURRENT_USER,
+                    games: playerStats.games,
+                    wins: playerStats.wins,
+                    solved_words: playerStats.winningWords
+                })
+            }
+        );
+
+        if (!response.ok) {
+            const details = await response.text();
+            throw new Error(
+                `Supabase save failed: ${response.status} ${details}`
+            );
+        }
+    } catch (err) {
+        console.error(err);
+    }
+}
+
+async function recordGameStart() {
+    // Never overwrite existing online history with zeros if the player
+    // clicks START before the first scoreboard request finishes.
+    await ensurePlayerStatsLoaded();
+    playerStats.games += 1;
+    await savePlayerStats();
+}
+
+async function recordWin() {
+    await ensurePlayerStatsLoaded();
+    playerStats.wins += 1;
+
+    if (!playerStats.winningWords.includes(WORD)) {
+        playerStats.winningWords.push(WORD);
+    }
+
+    await savePlayerStats();
+}
+
+const WORD_OPTIONS = [
+    "Testing",
+    "Res non verba",
+    "P!nk"
+];
+
+// Load the shared scoreboard from Supabase when the game opens.
+updateScoreboard();
+
+// Keep the scoreboard fresh if another player is playing elsewhere.
+setInterval(
+    updateAllPlayerScoreboard,
+    15000
+);
+
+let WORD = WORD_OPTIONS[0];
+let PLAYABLE_LETTERS = [];
+let previousWord = null;
+
+const CELL = 30;
+const SPEED = 135;
+
+/* ============================================================
+   MAZE
+   One base maze + mirrored variants.
+   Every round randomly selects one layout.
+   ============================================================ */
+
+const BASE_MAZE_STR = [
+    "11111111111111111111111111111111111111111",
+    "10000000000000000000100000000000000000001",
+    "10111101111101111110101111101111101111101",
+    "10000101000001000000100000101000001000001",
+    "11110101011111011111111110101011111011111",
+    "10000100010000000000100000100010000000001",
+    "10111111010111111110101111111010111111001",
+    "10000000010000000000100000000010000000001",
+    "10111101111101111110111110111111101111101",
+    "10000100000001000000000000100000001000001",
+    "11110111111001011111111110101111111011111",
+    "10000100001000010000000000100010000000001",
+    "10111101001111110111111110111010111111001",
+    "10000001000000000100000000100010000000001",
+    "10111111111101111110111111101111111111101",
+    "10000000000100000000100000001000000000001",
+    "11111101110111111110101111111011101111111",
+    "10000001000100000000100000000000100000001",
+    "10111111011101111111111110111110111111001",
+    "10000000010000000000100000100000100000001",
+    "10111101111111101110101111101111101111101",
+    "10000100000000001000100000000000001000001",
+    "11110111111111111011111111111111111011111",
+    "10000000000000000000000000000000000000001",
+    "11111111111111111111111111111111111111111"
+];
+
+const ROWS = BASE_MAZE_STR.length;
+const COLS = BASE_MAZE_STR[0].length;
+
+const BASE_PLAYER_START = [23, 2];
+const BASE_DINO_START = [1, 39];
+
+const BASE_PORTALS = {
+    A: [[1, 3], [23, 37]],
+    B: [[5, 38], [19, 2]],
+    C: [[17, 38], [3, 2]],
+    D: [[23, 20], [1, 20]]
+};
+
+const MAZE_VARIANTS = [
+    "normal",
+    "mirrorX",
+    "mirrorY",
+    "rotate180"
+];
+
+let MAZE = [];
+let PLAYER_START = [...BASE_PLAYER_START];
+let DINO_START = [...BASE_DINO_START];
+let PORTALS = {};
+let CURRENT_MAZE_VARIANT = "normal";
+
+function transformPos(pos, variant) {
+    const [r, c] = pos;
+
+    if (variant === "mirrorX") {
+        return [r, COLS - 1 - c];
+    }
+    if (variant === "mirrorY") {
+        return [ROWS - 1 - r, c];
+    }
+    if (variant === "rotate180") {
+        return [ROWS - 1 - r, COLS - 1 - c];
+    }
+    return [r, c];
+}
+
+function buildMaze(variant) {
+    let rows = [...BASE_MAZE_STR];
+
+    if (variant === "mirrorX" || variant === "rotate180") {
+        rows = rows.map(row => [...row].reverse().join(""));
+    }
+    if (variant === "mirrorY" || variant === "rotate180") {
+        rows = [...rows].reverse();
+    }
+
+    return rows.map(row => [...row].map(Number));
+}
+
+function applyRandomMaze() {
+    CURRENT_MAZE_VARIANT =
+        MAZE_VARIANTS[
+            Math.floor(Math.random() * MAZE_VARIANTS.length)
+        ];
+
+    MAZE = buildMaze(CURRENT_MAZE_VARIANT);
+    PLAYER_START = transformPos(BASE_PLAYER_START, CURRENT_MAZE_VARIANT);
+    DINO_START = transformPos(BASE_DINO_START, CURRENT_MAZE_VARIANT);
+
+    PORTALS = {};
+    for (const [label, pair] of Object.entries(BASE_PORTALS)) {
+        PORTALS[label] = [
+            transformPos(pair[0], CURRENT_MAZE_VARIANT),
+            transformPos(pair[1], CURRENT_MAZE_VARIANT)
+        ];
+    }
+}
+
+/* ============================================================
+   RANDOM WORD / PHRASE + RANDOM CASTLES
+   Spaces do NOT need castles.
+   Every other character DOES, including punctuation such as !.
+   ============================================================ */
+
+function chooseRandomWord() {
+    let choices = WORD_OPTIONS;
+
+    if (previousWord !== null && WORD_OPTIONS.length > 1) {
+        choices = WORD_OPTIONS.filter(word => word !== previousWord);
+    }
+
+    WORD = choices[Math.floor(Math.random() * choices.length)];
+    previousWord = WORD;
+    PLAYABLE_LETTERS = [...WORD].filter(ch => ch !== " ");
+}
+
+function allPortalKeys() {
+    const keys = new Set();
+    for (const pair of Object.values(PORTALS)) {
+        keys.add(keyOf(pair[0]));
+        keys.add(keyOf(pair[1]));
+    }
+    return keys;
+}
+
+function manhattan(a, b) {
+    return Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]);
+}
+
+function randomCastlePositions(count) {
+    const portalKeys = allPortalKeys();
+
+    const candidates = [];
+    for (let r = 1; r < ROWS - 1; r++) {
+        for (let c = 1; c < COLS - 1; c++) {
+            if (MAZE[r][c] !== 0) {
+                continue;
+            }
+
+            const p = [r, c];
+            const k = keyOf(p);
+
+            if (portalKeys.has(k)) {
+                continue;
+            }
+            if (samePos(p, PLAYER_START) || samePos(p, DINO_START)) {
+                continue;
+            }
+
+            // Keep castles away from the starting characters.
+            if (manhattan(p, PLAYER_START) < 5) {
+                continue;
+            }
+            if (manhattan(p, DINO_START) < 5) {
+                continue;
+            }
+
+            candidates.push(p);
+        }
+    }
+
+    // Try several times to obtain a nicely spread-out set.
+    for (let attempt = 0; attempt < 300; attempt++) {
+        const pool = shuffle(candidates);
+        const chosen = [];
+
+        for (const p of pool) {
+            const farEnough =
+                chosen.every(other => manhattan(p, other) >= 5);
+
+            if (farEnough) {
+                chosen.push(p);
+            }
+
+            if (chosen.length === count) {
+                return chosen;
+            }
+        }
+    }
+
+    // Fallback: slightly relax the spacing if a future long phrase
+    // needs more castles than the strict rule can fit.
+    for (let minDistance = 4; minDistance >= 2; minDistance--) {
+        const pool = shuffle(candidates);
+        const chosen = [];
+
+        for (const p of pool) {
+            if (chosen.every(other => manhattan(p, other) >= minDistance)) {
+                chosen.push(p);
+            }
+            if (chosen.length === count) {
+                return chosen;
+            }
+        }
+    }
+
+    return shuffle(candidates).slice(0, count);
+}
+
+let CASTLE_POSITIONS = [];
+
+/* ============================================================
+   HTML ELEMENTS
+   ============================================================ */
+
+const canvas =
+    document.getElementById(
+        "game"
+    );
+
+const ctx =
+    canvas.getContext(
+        "2d"
+    );
+
+canvas.width =
+    COLS * CELL;
+
+canvas.height =
+    ROWS * CELL;
+
+const statusEl =
+    document.getElementById(
+        "ks-status"
+    );
+
+const lettersEl =
+    document.getElementById(
+        "ks-letters"
+    );
+
+const guessPanel =
+    document.getElementById(
+        "guess-panel"
+    );
+
+const guessInput =
+    document.getElementById(
+        "guess-input"
+    );
+
+const guessButton =
+    document.getElementById(
+        "guess-button"
+    );
+
+const guessFeedback =
+    document.getElementById(
+        "guess-feedback"
+    );
+
+const foundLetters =
+    document.getElementById(
+        "found-letters"
+    );
+
+const guessRule =
+    document.getElementById(
+        "guess-rule"
+    );
+
+const introPanel =
+    document.getElementById(
+        "intro-panel"
+    );
+
+const gameArea =
+    document.getElementById(
+        "game-area"
+    );
+
+const startGameButton =
+    document.getElementById(
+        "start-game"
+    );
+
+const helpGameButton =
+    document.getElementById(
+        "help-game"
+    );
+
+const helpGameLiveButton =
+    document.getElementById(
+        "help-game-live"
+    );
+
+const helpModal =
+    document.getElementById(
+        "help-modal"
+    );
+
+const closeHelpButton =
+    document.getElementById(
+        "close-help"
+    );
+
+/* ============================================================
+   GAME VARIABLES
+   ============================================================ */
+
+let timer =
+    null;
+
+let guessTimer =
+    null;
+
+let state =
+    {};
+
+let fireworks =
+    [];
+
+let fireworkFrame =
+    0;
+
+let fireworkTimer =
+    null;
+
+let openingCountdownTimer =
+    null;
+
+let openingCountdownFinish =
+    null;
+
+/* ============================================================
+   UTILITIES
+   ============================================================ */
+
+function keyOf(pos) {
+
+    return (
+        `${pos[0]},${pos[1]}`
+    );
+
+}
+
+function shuffle(arr) {
+
+    const a =
+        [...arr];
+
+    for (
+        let i =
+            a.length - 1;
+
+        i > 0;
+
+        i--
+    ) {
+
+        const j =
+            Math.floor(
+                Math.random() *
+                (i + 1)
+            );
+
+        [
+            a[i],
+            a[j]
+        ] = [
+            a[j],
+            a[i]
+        ];
+
+    }
+
+    return a;
+
+}
+
+/* ============================================================
+   RESET
+   ============================================================ */
+
+function resetGame(
+    beginNow = true
+) {
+
+    if (timer) {
+
+        clearInterval(
+            timer
+        );
+
+        timer =
+            null;
+    }
+
+    if (guessTimer) {
+
+        clearTimeout(
+            guessTimer
+        );
+
+        guessTimer =
+            null;
+    }
+
+    if (openingCountdownTimer) {
+
+        clearInterval(
+            openingCountdownTimer
+        );
+
+        openingCountdownTimer =
+            null;
+    }
+
+    if (openingCountdownFinish) {
+
+        clearTimeout(
+            openingCountdownFinish
+        );
+
+        openingCountdownFinish =
+            null;
+    }
+
+    stopFireworks();
+
+    applyRandomMaze();
+    chooseRandomWord();
+
+    CASTLE_POSITIONS =
+        randomCastlePositions(
+            PLAYABLE_LETTERS.length
+        );
+
+    const shuffled =
+        shuffle(
+            PLAYABLE_LETTERS
+        );
+
+    const letterMap = {};
+
+    CASTLE_POSITIONS.forEach(
+        (p, i) => {
+            letterMap[keyOf(p)] = shuffled[i];
+        }
+    );
+
+    state = {
+
+        gameOver:
+            false,
+
+        awaitingGuess:
+            false,
+
+        won:
+            false,
+
+        score:
+            0,
+
+        paused:
+            false,
+
+        countdownActive:
+            false,
+
+        countdownValue:
+            null,
+
+        player:
+            [...PLAYER_START],
+
+        playerDir:
+            [0, 0],
+
+        nextDir:
+            [0, 0],
+
+        dino:
+            [...DINO_START],
+
+        dinoTick:
+            0,
+
+        castles:
+            new Set(
+                CASTLE_POSITIONS.map(
+                    keyOf
+                )
+            ),
+
+        castleLetters:
+            letterMap,
+
+        collected:
+            [],
+
+        portalCooldown:
+            0,
+
+        lastEvent:
+            "Find all letters in the castles!"
+
+    };
+
+    guessPanel.style.display =
+        "none";
+
+    guessFeedback.textContent =
+        "";
+
+    guessInput.value =
+        "";
+
+    render();
+
+    if (beginNow) {
+
+        startOpeningCountdown();
+
+    }
+
+}
+
+/* ============================================================
+   WALL CHECK
+   ============================================================ */
+
+function isWall(
+    r,
+    c
+) {
+
+    return (
+
+        r < 0 ||
+
+        r >= ROWS ||
+
+        c < 0 ||
+
+        c >= COLS ||
+
+        MAZE[r][c] === 1
+
+    );
+
+}
+
+function samePos(
+    a,
+    b
+) {
+
+    return (
+
+        a[0] === b[0] &&
+
+        a[1] === b[1]
+
+    );
+
+}
+
+/* ============================================================
+   PLAYER MOVEMENT
+   ============================================================ */
+
+function movePlayer() {
+
+    let nr =
+        state.player[0] +
+        state.nextDir[0];
+
+    let nc =
+        state.player[1] +
+        state.nextDir[1];
+
+    if (
+        !isWall(
+            nr,
+            nc
+        )
+    ) {
+
+        state.playerDir =
+            [...state.nextDir];
+
+    }
+
+    nr =
+        state.player[0] +
+        state.playerDir[0];
+
+    nc =
+        state.player[1] +
+        state.playerDir[1];
+
+    if (
+        !isWall(
+            nr,
+            nc
+        )
+    ) {
+
+        state.player =
+            [nr, nc];
+
+    }
+
+    checkPortal();
+
+    checkCastle();
+
+    checkCollision();
+
+}
+
+/* ============================================================
+   PORTALS
+   ============================================================ */
+
+function checkPortal() {
+
+    if (
+        state.portalCooldown > 0
+    ) {
+
+        return;
+
+    }
+
+    for (
+        const [
+            label,
+            pair
+        ]
+        of
+        Object.entries(
+            PORTALS
+        )
+    ) {
+
+        const entry =
+            pair[0];
+
+        const exit =
+            pair[1];
+
+        if (
+            samePos(
+                state.player,
+                entry
+            )
+        ) {
+
+            state.player =
+                [...exit];
+
+            state.portalCooldown =
+                4;
+
+            state.lastEvent =
+                `🌀 Portal ${label}: purple IN → blue OUT`;
+
+            return;
+
+        }
+
+    }
+
+}
+
+/* ============================================================
+   CASTLE COLLECTION
+   ============================================================ */
+
+function checkCastle() {
+
+    const k =
+        keyOf(
+            state.player
+        );
+
+    if (
+        !state.castles.has(k)
+    ) {
+
+        return;
+
+    }
+
+    const letter =
+        state.castleLetters[k];
+
+    state.castles.delete(k);
+
+    state.collected.push(
+        letter
+    );
+
+    state.score +=
+        250;
+
+    state.lastEvent =
+        `🏰 Castle opened — letter: ${letter}`;
+
+    if (
+        state.castles.size === 0
+    ) {
+
+        state.playerDir =
+            [0, 0];
+
+        state.nextDir =
+            [0, 0];
+
+        state.awaitingGuess =
+            true;
+
+        state.lastEvent =
+            "🦖😢 NOOO! You got all the castles...";
+
+        /*
+        Show the guess panel almost immediately.
+        */
+
+        guessTimer =
+            setTimeout(
+                () => {
+
+                    if (
+                        !state.gameOver &&
+                        state.awaitingGuess
+                    ) {
+
+                        showGuessPanel();
+
+                    }
+
+                },
+                700
+            );
+
+    }
+
+}
+
+/* ============================================================
+   NEIGHBOURS
+   ============================================================ */
+
+function getNeighbors(
+    pos,
+    includePortals = true
+) {
+
+    const [
+        r,
+        c
+    ] = pos;
+
+    const out =
+        [];
+
+    for (
+        const [
+            dr,
+            dc
+        ]
+        of
+        [
+            [-1, 0],
+            [1, 0],
+            [0, -1],
+            [0, 1]
+        ]
+    ) {
+
+        const nr =
+            r + dr;
+
+        const nc =
+            c + dc;
+
+        if (
+            !isWall(
+                nr,
+                nc
+            )
+        ) {
+
+            out.push(
+                [nr, nc]
+            );
+
+        }
+
+    }
+
+    if (
+        includePortals
+    ) {
+
+        for (
+            const pair
+            of
+            Object.values(
+                PORTALS
+            )
+        ) {
+
+            if (
+                samePos(
+                    pos,
+                    pair[0]
+                )
+            ) {
+
+                out.push(
+                    [...pair[1]]
+                );
+
+            }
+
+        }
+
+    }
+
+    return out;
+
+}
+
+/* ============================================================
+   BFS PATH FINDING
+   ============================================================ */
+
+function bfsNextStep(
+    start,
+    target
+) {
+
+    if (
+        samePos(
+            start,
+            target
+        )
+    ) {
+
+        return [...start];
+
+    }
+
+    const q =
+        [[...start]];
+
+    const prev =
+        new Map();
+
+    prev.set(
+        keyOf(start),
+        null
+    );
+
+    let found =
+        false;
+
+    while (
+        q.length
+    ) {
+
+        const cur =
+            q.shift();
+
+        if (
+            samePos(
+                cur,
+                target
+            )
+        ) {
+
+            found =
+                true;
+
+            break;
+
+        }
+
+        for (
+            const nxt
+            of
+            getNeighbors(
+                cur,
+                true
+            )
+        ) {
+
+            const k =
+                keyOf(nxt);
+
+            if (
+                !prev.has(k)
+            ) {
+
+                prev.set(
+                    k,
+                    cur
+                );
+
+                q.push(
+                    nxt
+                );
+
+            }
+
+        }
+
+    }
+
+    if (
+        !found &&
+        !prev.has(
+            keyOf(target)
+        )
+    ) {
+
+        return [...start];
+
+    }
+
+    let step =
+        [...target];
+
+    let parent =
+        prev.get(
+            keyOf(step)
+        );
+
+    if (
+        parent === undefined
+    ) {
+
+        return [...start];
+
+    }
+
+    while (
+        parent &&
+        !samePos(
+            parent,
+            start
+        )
+    ) {
+
+        step =
+            [...parent];
+
+        parent =
+            prev.get(
+                keyOf(step)
+            );
+
+    }
+
+    return step;
+
+}
+
+/* ============================================================
+   PREDICT PLAYER MOVEMENT
+   ============================================================ */
+
+function predictPlayerTarget() {
+
+    let target =
+        [...state.player];
+
+    const [
+        dr,
+        dc
+    ] =
+        state.playerDir;
+
+    for (
+        let i = 0;
+        i < 3;
+        i++
+    ) {
+
+        const nr =
+            target[0] + dr;
+
+        const nc =
+            target[1] + dc;
+
+        if (
+            isWall(
+                nr,
+                nc
+            )
+        ) {
+
+            break;
+
+        }
+
+        target =
+            [nr, nc];
+
+    }
+
+    return target;
+
+}
+
+/* ============================================================
+   DINOSAUR AI
+   ============================================================ */
+
+function moveDino() {
+
+    state.dinoTick +=
+        1;
+
+    /*
+    Dino skips every fourth move.
+    Player therefore has a slight
+    speed advantage.
+    */
+
+    if (
+        state.dinoTick % 4 === 0
+    ) {
+
+        return;
+
+    }
+
+    const start =
+        [...state.dino];
+
+    const player =
+        [...state.player];
+
+    const predicted =
+        predictPlayerTarget();
+
+    const manhattan =
+
+        Math.abs(
+            start[0] -
+            player[0]
+        )
+
+        +
+
+        Math.abs(
+            start[1] -
+            player[1]
+        );
+
+    const target =
+
+        manhattan <= 7
+
+        ?
+
+        player
+
+        :
+
+        predicted;
+
+    let next =
+        bfsNextStep(
+            start,
+            target
+        );
+
+    if (
+        samePos(
+            next,
+            start
+        )
+
+        &&
+
+        !samePos(
+            start,
+            player
+        )
+    ) {
+
+        next =
+            bfsNextStep(
+                start,
+                player
+            );
+
+    }
+
+    state.dino =
+        [...next];
+
+    /*
+    Dino can use portals too.
+    */
+
+    for (
+        const pair
+        of
+        Object.values(
+            PORTALS
+        )
+    ) {
+
+        if (
+            samePos(
+                state.dino,
+                pair[0]
+            )
+        ) {
+
+            state.dino =
+                [...pair[1]];
+
+            break;
+
+        }
+
+    }
+
+    checkCollision();
+
+}
+
+/* ============================================================
+   COLLISION
+   ============================================================ */
+
+function checkCollision() {
+
+    if (
+        state.awaitingGuess ||
+        state.gameOver
+    ) {
+
+        return;
+
+    }
+
+    if (
+        samePos(
+            state.player,
+            state.dino
+        )
+    ) {
+
+        state.gameOver =
+            true;
+
+        state.won =
+            false;
+
+        state.playerDir =
+            [0, 0];
+
+        state.nextDir =
+            [0, 0];
+
+        state.lastEvent =
+            "🦖 NOM NOM... you were delicious!";
+
+    }
+
+}
+
+/* ============================================================
+   INITIAL 3-2-1-GO COUNTDOWN
+   ============================================================ */
+
+function startOpeningCountdown() {
+
+    if (timer) {
+
+        clearInterval(
+            timer
+        );
+
+        timer =
+            null;
+
+    }
+
+    if (openingCountdownTimer) {
+
+        clearInterval(
+            openingCountdownTimer
+        );
+
+    }
+
+    if (openingCountdownFinish) {
+
+        clearTimeout(
+            openingCountdownFinish
+        );
+
+    }
+
+    state.paused =
+        true;
+
+    state.countdownActive =
+        true;
+
+    state.countdownValue =
+        3;
+
+    state.lastEvent =
+        "Get ready...";
+
+    render();
+
+    openingCountdownTimer =
+        setInterval(
+            () => {
+
+                if (
+                    state.countdownValue > 1
+                ) {
+
+                    state.countdownValue -=
+                        1;
+
+                    render();
+
+                    return;
+
+                }
+
+                if (
+                    state.countdownValue === 1
+                ) {
+
+                    state.countdownValue =
+                        "GO!";
+
+                    state.lastEvent =
+                        "GO! 🐶💨";
+
+                    render();
+
+                    return;
+
+                }
+
+                clearInterval(
+                    openingCountdownTimer
+                );
+
+                openingCountdownTimer =
+                    null;
+
+            },
+            850
+        );
+
+    openingCountdownFinish =
+        setTimeout(
+            () => {
+
+                if (
+                    openingCountdownTimer
+                ) {
+
+                    clearInterval(
+                        openingCountdownTimer
+                    );
+
+                    openingCountdownTimer =
+                        null;
+
+                }
+
+                state.countdownActive =
+                    false;
+
+                state.countdownValue =
+                    null;
+
+                state.paused =
+                    false;
+
+                state.lastEvent =
+                    "Visit all castles!";
+
+                render();
+
+                timer =
+                    setInterval(
+                        gameLoop,
+                        SPEED
+                    );
+
+                ROOT.focus();
+
+            },
+            3400
+        );
+
+}
+
+/* ============================================================
+   PAUSE
+   ============================================================ */
+
+function pauseGame() {
+
+    if (
+        state.gameOver ||
+        state.awaitingGuess ||
+        state.countdownActive
+    ) {
+
+        return;
+
+    }
+
+    if (
+        !state.paused
+    ) {
+
+        state.paused =
+            true;
+
+        state.playerDir =
+            [0, 0];
+
+        state.nextDir =
+            [0, 0];
+
+        state.lastEvent =
+            "🐾 Pawsing the Claws...";
+
+        render();
+
+    }
+
+    else {
+
+        startCountdown();
+
+    }
+
+}
+
+/* ============================================================
+   PAUSE RESUME COUNTDOWN
+   ============================================================ */
+
+function startCountdown() {
+
+    if (
+        !state.paused ||
+        state.countdownActive
+    ) {
+
+        return;
+
+    }
+
+    state.countdownActive =
+        true;
+
+    state.countdownValue =
+        3;
+
+    state.lastEvent =
+        "Get ready...";
+
+    render();
+
+    const countdown =
+        setInterval(
+            () => {
+
+                state.countdownValue -=
+                    1;
+
+                if (
+                    state.countdownValue <= 0
+                ) {
+
+                    clearInterval(
+                        countdown
+                    );
+
+                    state.countdownActive =
+                        false;
+
+                    state.countdownValue =
+                        null;
+
+                    state.paused =
+                        false;
+
+                    state.lastEvent =
+                        "GO! 🐶💨";
+
+                    render();
+
+                    ROOT.focus();
+
+                    return;
+
+                }
+
+                render();
+
+            },
+            1000
+        );
+
+}
+
+/* ============================================================
+   LETTER HELPERS
+   ============================================================ */
+
+function counts(s) {
+
+    const m =
+        {};
+
+    for (
+        const ch
+        of s
+    ) {
+
+        m[ch] =
+            (m[ch] || 0) + 1;
+
+    }
+
+    return m;
+
+}
+
+function sameCounts(
+    a,
+    b
+) {
+
+    const ca =
+        counts(a);
+
+    const cb =
+        counts(b);
+
+    const keys =
+        new Set(
+            [
+                ...Object.keys(ca),
+                ...Object.keys(cb)
+            ]
+        );
+
+    for (
+        const k
+        of keys
+    ) {
+
+        if (
+            (ca[k] || 0)
+            !==
+            (cb[k] || 0)
+        ) {
+
+            return false;
+
+        }
+
+    }
+
+    return true;
+
+}
+
+/* ============================================================
+   GUESS PANEL
+   ============================================================ */
+
+function showGuessPanel() {
+
+    guessRule.textContent =
+        `Use all ${PLAYABLE_LETTERS.length} characters to finish the game.`;
+
+    foundLetters.textContent =
+        "Letters you found: "
+        +
+        state.collected.join(
+            "   "
+        );
+
+    guessPanel.style.display =
+        "block";
+
+    guessFeedback.textContent =
+        "";
+
+    guessInput.value =
+        "";
+
+    guessInput.focus();
+
+    requestAnimationFrame(() => {
+        guessPanel.scrollIntoView({
+            behavior: "smooth",
+            block: "center"
+        });
+    });
+
+}
+
+/* ============================================================
+   GUESS WORD
+   ============================================================ */
+
+function normalizedSpacing(s) {
+    return s
+        .trim()
+        .replace(/\s+/g, " ");
+}
+
+function answerMatches(rawGuess) {
+    const guess = normalizedSpacing(rawGuess);
+    const answer = normalizedSpacing(WORD);
+
+    // P!nk is deliberately case-sensitive:
+    // correct = P!nk
+    // wrong   = p!nk, P!NK, etc.
+    if (WORD === "P!nk") {
+        return guess === answer;
+    }
+
+    // The other words/phrases are case-insensitive.
+    return guess.toLocaleLowerCase() === answer.toLocaleLowerCase();
+}
+
+function playableOnly(s) {
+    return [...normalizedSpacing(s)]
+        .filter(ch => ch !== " ")
+        .join("");
+}
+
+function submitGuess() {
+    const rawGuess = guessInput.value;
+
+    if (answerMatches(rawGuess)) {
+        state.awaitingGuess = false;
+        state.gameOver = true;
+        state.won = true;
+        state.score += 1000;
+        state.lastEvent = `🎉 CORRECT! ${WORD}!`;
+
+        recordWin();
+
+        guessPanel.style.display = "none";
+        render();
+
+        // Move the view back to the game before the fireworks start.
+        requestAnimationFrame(() => {
+            canvas.scrollIntoView({
+                behavior: "smooth",
+                block: "center"
+            });
+        });
+
+        setTimeout(() => {
+            startFireworks();
+        }, 350);
+
+        return;
+    }
+
+    const collected = state.collected.join("");
+    const guessedPlayable = playableOnly(rawGuess);
+    const collectedPlayable = playableOnly(collected);
+
+    const comparableGuess =
+        WORD === "P!nk"
+            ? guessedPlayable
+            : guessedPlayable.toLocaleLowerCase();
+
+    const comparableCollected =
+        WORD === "P!nk"
+            ? collectedPlayable
+            : collectedPlayable.toLocaleLowerCase();
+
+    if (!sameCounts(comparableGuess, comparableCollected)) {
+        guessFeedback.textContent =
+            "🦖 RAWR! Sneaky characters? " +
+            `Use only the ${PLAYABLE_LETTERS.length} characters you actually found: ` +
+            state.collected.join(" ");
+
+        guessFeedback.style.color = "#fbbf24";
+    } else if (
+        WORD === "P!nk" &&
+        normalizedSpacing(rawGuess) !== "P!nk"
+    ) {
+        guessFeedback.textContent =
+            "Almost! For this one capitalization matters: P is uppercase, n and k are lowercase — and don't forget !";
+        guessFeedback.style.color = "#fbbf24";
+    } else {
+        guessFeedback.textContent =
+            "🦖 Whomp, whomp... Better luck next time! 😋";
+        guessFeedback.style.color = "#ff6b6b";
+    }
+
+    guessInput.value = "";
+    guessInput.focus();
+}
+
+/* ============================================================
+   GAME LOOP
+   ============================================================ */
+
+function gameLoop() {
+
+    if (
+
+        !state.gameOver
+
+        &&
+
+        !state.awaitingGuess
+
+        &&
+
+        !state.paused
+
+        &&
+
+        !state.countdownActive
+
+    ) {
+
+        if (
+            state.portalCooldown > 0
+        ) {
+
+            state.portalCooldown -=
+                1;
+
+        }
+
+        movePlayer();
+
+        if (
+            !state.gameOver &&
+            !state.awaitingGuess
+        ) {
+
+            moveDino();
+
+        }
+
+    }
+
+    render();
+
+}
+
+/* ============================================================
+   TEXT LABELS
+   ============================================================ */
+
+function answerPattern() {
+    let collectedIndex = 0;
+
+    return [...WORD]
+        .map(ch => {
+            if (ch !== " ") {
+                if (collectedIndex < state.collected.length) {
+                    return state.collected[collectedIndex++];
+                }
+                collectedIndex++;
+                return "_";
+            }
+
+            // Spaces are shown automatically and do not need castles.
+            return "   ";
+        })
+        .join(" ");
+}
+
+function updateLabels() {
+    const total = PLAYABLE_LETTERS.length;
+    const found = total - state.castles.size;
+
+    statusEl.textContent =
+        `Castles ${found}/${total}` +
+        `   •   Score ${state.score}` +
+        `   •   ${state.lastEvent}`;
+
+    lettersEl.textContent =
+        "Letters:   " + answerPattern();
+}
+
+/* ============================================================
+   DRAW HELPERS
+   ============================================================ */
+
+function drawRect(
+    x,
+    y,
+    w,
+    h,
+    fill,
+    stroke = null,
+    sw = 1
+) {
+
+    ctx.fillStyle =
+        fill;
+
+    ctx.fillRect(
+        x,
+        y,
+        w,
+        h
+    );
+
+    if (
+        stroke
+    ) {
+
+        ctx.strokeStyle =
+            stroke;
+
+        ctx.lineWidth =
+            sw;
+
+        ctx.strokeRect(
+            x,
+            y,
+            w,
+            h
+        );
+
+    }
+
+}
+
+/* ============================================================
+   DRAW PORTAL
+   ============================================================ */
+
+function drawPortal(
+    pos,
+    label,
+    entry
+) {
+
+    const [
+        r,
+        c
+    ] =
+        pos;
+
+    const cx =
+        c * CELL +
+        CELL / 2;
+
+    const cy =
+        r * CELL +
+        CELL / 2;
+
+    ctx.beginPath();
+
+    ctx.arc(
+        cx,
+        cy,
+        14,
+        0,
+        Math.PI * 2
+    );
+
+    ctx.fillStyle =
+
+        entry
+
+        ?
+
+        "#7c3aed"
+
+        :
+
+        "#0284c7";
+
+    ctx.fill();
+
+    ctx.strokeStyle =
+
+        entry
+
+        ?
+
+        "#e9d5ff"
+
+        :
+
+        "#bae6fd";
+
+    ctx.lineWidth =
+        3;
+
+    ctx.stroke();
+
+    ctx.beginPath();
+
+    ctx.arc(
+        cx,
+        cy,
+        9,
+        0,
+        Math.PI * 2
+    );
+
+    ctx.strokeStyle =
+        "white";
+
+    ctx.lineWidth =
+        1;
+
+    ctx.stroke();
+
+    ctx.textAlign =
+        "center";
+
+    ctx.fillStyle =
+        "white";
+
+    ctx.font =
+        "bold 12px Arial";
+
+    ctx.fillText(
+        label,
+        cx,
+        cy + 2
+    );
+
+    ctx.font =
+        "bold 6px Arial";
+
+    ctx.fillText(
+        entry
+        ?
+        "IN"
+        :
+        "OUT",
+
+        cx,
+
+        cy + 11
+    );
+
+}
+
+/* ============================================================
+   DRAW CASTLE
+   ============================================================ */
+
+function drawCastle(pos) {
+
+    const [
+        r,
+        c
+    ] =
+        pos;
+
+    const cx =
+        c * CELL +
+        CELL / 2;
+
+    const cy =
+        r * CELL +
+        CELL / 2;
+
+    ctx.beginPath();
+
+    ctx.arc(
+        cx,
+        cy,
+        14,
+        0,
+        Math.PI * 2
+    );
+
+    ctx.fillStyle =
+        "#fde68a";
+
+    ctx.fill();
+
+    ctx.strokeStyle =
+        "#f59e0b";
+
+    ctx.lineWidth =
+        2;
+
+    ctx.stroke();
+
+    drawRect(
+        cx - 10,
+        cy - 3,
+        20,
+        12,
+        "#d6a24b",
+        "#7c4a16"
+    );
+
+    drawRect(
+        cx - 11,
+        cy - 10,
+        7,
+        8,
+        "#d6a24b",
+        "#7c4a16"
+    );
+
+    drawRect(
+        cx + 4,
+        cy - 10,
+        7,
+        8,
+        "#d6a24b",
+        "#7c4a16"
+    );
+
+    drawRect(
+        cx - 3,
+        cy + 3,
+        6,
+        6,
+        "#7c4a16"
+    );
+
+}
+
+/* ============================================================
+   DRAW PLAYER - RED DOG
+   ============================================================ */
+
+function drawPlayer() {
+
+    const [r, c] = state.player;
+    const cx = c * CELL + CELL / 2;
+    const cy = r * CELL + CELL / 2;
+
+    /* LEFT EAR */
+
+    ctx.beginPath();
+
+    ctx.ellipse(
+        cx - 11,
+        cy - 2,
+        6,
+        10,
+        -.25,
+        0,
+        Math.PI * 2
+    );
+
+    ctx.fillStyle =
+        "#15803d";
+
+    ctx.fill();
+
+    /* RIGHT EAR */
+
+    ctx.beginPath();
+
+    ctx.ellipse(
+        cx + 11,
+        cy - 2,
+        6,
+        10,
+        .25,
+        0,
+        Math.PI * 2
+    );
+
+    ctx.fill();
+
+    /* HEAD */
+
+    ctx.beginPath();
+
+    ctx.arc(
+        cx,
+        cy,
+        13,
+        0,
+        Math.PI * 2
+    );
+
+    ctx.fillStyle =
+        "#22c55e";
+
+    ctx.fill();
+
+    ctx.strokeStyle =
+        "#bbf7d0";
+
+    ctx.lineWidth =
+        2;
+
+    ctx.stroke();
+
+    /* MUZZLE */
+
+    ctx.beginPath();
+
+    ctx.ellipse(
+        cx,
+        cy + 5,
+        8,
+        6,
+        0,
+        0,
+        Math.PI * 2
+    );
+
+    ctx.fillStyle =
+        "#dcfce7";
+
+    ctx.fill();
+
+    /* EYES */
+
+    ctx.beginPath();
+
+    ctx.arc(
+        cx - 5,
+        cy - 4,
+        2,
+        0,
+        Math.PI * 2
+    );
+
+    ctx.arc(
+        cx + 5,
+        cy - 4,
+        2,
+        0,
+        Math.PI * 2
+    );
+
+    ctx.fillStyle =
+        "#111827";
+
+    ctx.fill();
+
+    /* NOSE */
+
+    ctx.beginPath();
+
+    ctx.ellipse(
+        cx,
+        cy + 2,
+        3,
+        2.5,
+        0,
+        0,
+        Math.PI * 2
+    );
+
+    ctx.fill();
+
+}
+
+/* ============================================================
+   DRAW DINOSAUR
+   ============================================================ */
+
+function drawDino() {
+
+    const [
+        r,
+        c
+    ] =
+        state.dino;
+
+    const cx =
+        c * CELL +
+        CELL / 2;
+
+    const cy =
+        r * CELL +
+        CELL / 2;
+
+    ctx.fillStyle =
+        "#ef4444";
+
+    ctx.strokeStyle =
+        "#fca5a5";
+
+    ctx.lineWidth =
+        2;
+
+    ctx.beginPath();
+
+    ctx.arc(
+        cx,
+        cy - 1,
+        14,
+        Math.PI,
+        0
+    );
+
+    ctx.lineTo(
+        cx + 14,
+        cy + 8
+    );
+
+    ctx.lineTo(
+        cx - 14,
+        cy + 8
+    );
+
+    ctx.closePath();
+
+    ctx.fill();
+
+    ctx.stroke();
+
+    ctx.textAlign =
+        "center";
+
+    ctx.font =
+        "15px Arial";
+
+    ctx.fillText(
+        "🦖",
+        cx,
+        cy + 5
+    );
+
+}
+
+/* ============================================================
+   OVERLAY BOX
+   ============================================================ */
+
+function overlayBox(
+    w,
+    h,
+    border
+) {
+
+    const cx =
+        canvas.width / 2;
+
+    const cy =
+        canvas.height / 2;
+
+    drawRect(
+
+        cx - w / 2,
+
+        cy - h / 2,
+
+        w,
+
+        h,
+
+        "#111827",
+
+        border,
+
+        4
+
+    );
+
+    return [
+        cx,
+        cy
+    ];
+
+}
+
+/* ============================================================
+   PAUSE / COUNTDOWN OVERLAY
+   ============================================================ */
+
+function drawPauseOverlay() {
+
+    if (
+        state.countdownActive &&
+        state.countdownValue != null
+    ) {
+
+        const [
+            cx,
+            cy
+        ] =
+            overlayBox(
+                320,
+                230,
+                "#f87171"
+            );
+
+        ctx.textAlign =
+            "center";
+
+        ctx.fillStyle =
+            "white";
+
+        ctx.font =
+            "bold 24px Arial";
+
+        ctx.fillText(
+            "READY?",
+            cx,
+            cy - 38
+        );
+
+        ctx.fillStyle =
+            "#fde047";
+
+        ctx.font =
+
+            state.countdownValue === "GO!"
+
+            ?
+
+            "bold 72px Arial"
+
+            :
+
+            "bold 72px Arial";
+
+        ctx.fillText(
+
+            String(
+                state.countdownValue
+            ),
+
+            cx,
+
+            cy + 28
+
+        );
+
+        return;
+
+    }
+
+    const [
+        cx,
+        cy
+    ] =
+        overlayBox(
+            760,
+            230,
+            "#f87171"
+        );
+
+    ctx.textAlign =
+        "center";
+
+    ctx.fillStyle =
+        "#bbf7d0";
+
+    ctx.font =
+        "bold 32px Arial";
+
+    ctx.fillText(
+        "🐾 PAWSING THE CLAWS 🐾",
+        cx,
+        cy - 62
+    );
+
+    ctx.fillStyle =
+        "white";
+
+    ctx.font =
+        "bold 20px Arial";
+
+    ctx.fillText(
+        "Hunting for letters, dodging T-Rexes...",
+        cx,
+        cy - 12
+    );
+
+    ctx.fillText(
+        "even legendary castle explorers need a breather.",
+        cx,
+        cy + 18
+    );
+
+    ctx.fillStyle =
+        "#93c5fd";
+
+    ctx.fillText(
+        "Press SPACE when you're ready to run again!",
+        cx,
+        cy + 72
+    );
+
+}
+
+/* ============================================================
+   GUESS OVERLAY
+   ============================================================ */
+
+function drawGuessOverlay() {
+    const [cx, cy] = overlayBox(
+        780,
+        190,
+        "#ffd166"
+    );
+
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#ffd166";
+    ctx.font = "bold 31px Arial";
+    ctx.fillText(
+        "🦖😢 NOOO! YOU GOT ALL THE CASTLES!",
+        cx,
+        cy - 42
+    );
+
+    ctx.fillStyle = "#86efac";
+    ctx.font = "bold 21px Arial";
+    ctx.fillText(
+        "My snack escaped... Fine. Guess the word or phrase!",
+        cx,
+        cy + 8
+    );
+
+    ctx.fillStyle = "white";
+    ctx.font = "bold 18px Arial";
+    ctx.fillText(
+        `Use all ${PLAYABLE_LETTERS.length} letters to finish the game.`,
+        cx,
+        cy + 50
+    );
+}
+
+/* ============================================================
+   WIN / DEATH OVERLAY
+   ============================================================ */
+
+function drawEndOverlay() {
+
+    const [
+        cx,
+        cy
+    ] =
+        overlayBox(
+
+            780,
+
+            220,
+
+            state.won
+
+            ?
+
+            "#22c55e"
+
+            :
+
+            "#22c55e"
+
+        );
+
+    ctx.textAlign =
+        "center";
+
+    if (
+        state.won
+    ) {
+
+        ctx.fillStyle =
+            "#fde047";
+
+        ctx.font =
+            "bold 36px Arial";
+
+        ctx.fillText(
+            "🎉 CONGRATULATIONS! 🎉",
+            cx,
+            cy - 42
+        );
+
+        ctx.fillStyle =
+            "#7dd3fc";
+
+        ctx.font =
+            "bold 40px Arial";
+
+        ctx.fillText(
+            WORD,
+            cx,
+            cy + 24
+        );
+
+    }
+
+    else {
+
+        ctx.fillStyle =
+            "#86efac";
+
+        ctx.font =
+            "bold 36px Arial";
+
+        ctx.fillText(
+            "🦖 NOM NOM NOM!",
+            cx,
+            cy - 42
+        );
+
+        ctx.fillStyle =
+            "white";
+
+        ctx.font =
+            "bold 24px Arial";
+
+        ctx.fillText(
+            "You were delicious! 😋",
+            cx,
+            cy + 18
+        );
+
+    }
+
+}
+
+/* ============================================================
+   MAIN DRAW
+   ============================================================ */
+
+function render() {
+
+    updateLabels();
+
+    ctx.clearRect(
+        0,
+        0,
+        canvas.width,
+        canvas.height
+    );
+
+    drawRect(
+        0,
+        0,
+        canvas.width,
+        canvas.height,
+        "#050816"
+    );
+
+    /* DRAW MAZE */
+
+    for (
+        let r = 0;
+        r < ROWS;
+        r++
+    ) {
+
+        for (
+            let c = 0;
+            c < COLS;
+            c++
+        ) {
+
+            const x =
+                c * CELL;
+
+            const y =
+                r * CELL;
+
+            if (
+                MAZE[r][c] === 1
+            ) {
+
+                drawRect(
+
+                    x + 1,
+
+                    y + 1,
+
+                    CELL - 2,
+
+                    CELL - 2,
+
+                    "#111827",
+
+                    "#2563eb",
+
+                    2
+
+                );
+
+            }
+
+            else if (
+                (r + c) % 3 === 0
+            ) {
+
+                ctx.beginPath();
+
+                ctx.arc(
+                    x + CELL / 2,
+                    y + CELL / 2,
+                    1,
+                    0,
+                    Math.PI * 2
+                );
+
+                ctx.fillStyle =
+                    "#a78bfa";
+
+                ctx.fill();
+
+            }
+
+        }
+
+    }
+
+    /* PORTALS */
+
+    for (
+        const [
+            label,
+            pair
+        ]
+        of
+        Object.entries(
+            PORTALS
+        )
+    ) {
+
+        drawPortal(
+            pair[0],
+            label,
+            true
+        );
+
+        drawPortal(
+            pair[1],
+            label,
+            false
+        );
+
+    }
+
+    /* CASTLES */
+
+    for (
+        const k
+        of state.castles
+    ) {
+
+        drawCastle(
+            k
+                .split(",")
+                .map(Number)
+        );
+
+    }
+
+    /* CHARACTERS */
+
+    drawDino();
+
+    drawPlayer();
+
+    /* OVERLAYS */
+
+    if (
+        state.awaitingGuess
+    ) {
+        // Keep the maze visible while the lower guess panel is active.
+        // The guess panel below the game already shows the message.
+    }
+
+    else if (
+        state.gameOver
+    ) {
+
+        drawEndOverlay();
+
+    }
+
+    else if (
+        state.paused
+    ) {
+
+        drawPauseOverlay();
+
+    }
+
+    drawFireworks();
+
+}
+
+/* ============================================================
+   FIREWORKS
+   ============================================================ */
+
+function startFireworks() {
+
+    stopFireworks();
+
+    fireworks =
+        [];
+
+    fireworkFrame =
+        0;
+
+    for (
+        let i = 0;
+        i < 7;
+        i++
+    ) {
+
+        spawnFirework();
+
+    }
+
+    fireworkTimer =
+        setInterval(
+            () => {
+
+                fireworkFrame++;
+
+                if (
+                    fireworkFrame > 360
+                ) {
+
+                    stopFireworks();
+
+                    render();
+
+                    return;
+
+                }
+
+                for (
+                    const fw
+                    of fireworks
+                ) {
+
+                    for (
+                        const p
+                        of fw.particles
+                    ) {
+
+                        const rad =
+
+                            p.angle *
+
+                            Math.PI /
+
+                            180;
+
+                        p.x +=
+
+                            Math.cos(rad)
+
+                            *
+
+                            p.speed;
+
+                        p.y +=
+
+                            Math.sin(rad)
+
+                            *
+
+                            p.speed
+
+                            +
+
+                            p.gravity
+
+                            *
+
+                            0.13;
+
+                        p.gravity +=
+                            0.12;
+
+                        p.speed *=
+                            0.985;
+
+                    }
+
+                }
+
+                // Keep launching new fireworks
+                // throughout the celebration
+                if (
+                    fireworkFrame % 15 === 0
+                ) {
+
+                    for (
+                        let i = 0;
+                        i < 3;
+                        i++
+                    ) {
+
+                        spawnFirework();
+
+                    }
+
+                }
+
+                render();
+
+            },
+            45
+        );
+
+}
+
+/* ============================================================
+   SPAWN FIREWORK
+   ============================================================ */
+
+function spawnFirework() {
+
+    const palette = [
+
+        "#fde047",
+
+        "#fb7185",
+
+        "#22d3ee",
+
+        "#a78bfa",
+
+        "#34d399",
+
+        "#f97316"
+
+    ];
+
+    const color =
+
+        palette[
+
+            Math.floor(
+
+                Math.random()
+
+                *
+
+                palette.length
+
+            )
+
+        ];
+
+    const cx =
+
+        80
+
+        +
+
+        Math.random()
+
+        *
+
+        (
+            canvas.width -
+            160
+        );
+
+    const cy =
+
+        70
+
+        +
+
+        Math.random()
+
+        *
+
+        (
+            canvas.height /
+            2
+        );
+
+    const particles =
+        [];
+
+    for (
+        let i = 0;
+        i < 18;
+        i++
+    ) {
+
+        particles.push(
+            {
+
+                x:
+                    cx,
+
+                y:
+                    cy,
+
+                angle:
+                    i * 20,
+
+                speed:
+                    2.4
+                    +
+                    Math.random()
+                    *
+                    2.8,
+
+                gravity:
+                    0
+
+            }
+        );
+
+    }
+
+    fireworks.push(
+        {
+            color,
+            particles
+        }
+    );
+
+}
+
+/* ============================================================
+   DRAW FIREWORKS
+   ============================================================ */
+
+function drawFireworks() {
+
+    for (
+        const fw
+        of fireworks
+    ) {
+
+        for (
+            const p
+            of fw.particles
+        ) {
+
+            const size =
+
+                Math.max(
+
+                    1.5,
+
+                    Math.min(
+                        4,
+                        p.speed
+                    )
+
+                );
+
+            ctx.beginPath();
+
+            ctx.arc(
+                p.x,
+                p.y,
+                size,
+                0,
+                Math.PI * 2
+            );
+
+            ctx.fillStyle =
+                fw.color;
+
+            ctx.fill();
+
+        }
+
+    }
+
+}
+
+/* ============================================================
+   STOP FIREWORKS
+   ============================================================ */
+
+function stopFireworks() {
+
+    if (
+        fireworkTimer
+    ) {
+
+        clearInterval(
+            fireworkTimer
+        );
+
+    }
+
+    fireworkTimer =
+        null;
+
+    fireworks =
+        [];
+
+}
+
+/* ============================================================
+   KEYBOARD
+   ============================================================ */
+
+function keyHandler(e) {
+
+    const tag =
+
+        (
+            e.target
+
+            &&
+
+            e.target.tagName
+
+            ||
+
+            ""
+        )
+
+        .toLowerCase();
+
+    const editing =
+
+        tag === "input"
+
+        ||
+
+        tag === "textarea";
+
+    if (
+        editing
+    ) {
+
+        if (
+
+            e.key === "Enter"
+
+            &&
+
+            e.target === guessInput
+
+        ) {
+
+            e.preventDefault();
+
+            submitGuess();
+
+        }
+
+        return;
+
+    }
+
+    const key =
+        e.key.toLowerCase();
+
+    /* SPACE = PAUSE */
+
+    if (
+        key === " "
+    ) {
+
+        e.preventDefault();
+
+        pauseGame();
+
+        return;
+
+    }
+
+    if (
+
+        state.gameOver
+
+        ||
+
+        state.awaitingGuess
+
+        ||
+
+        state.paused
+
+        ||
+
+        state.countdownActive
+
+    ) {
+
+        return;
+
+    }
+
+    const dirs = {
+
+        arrowup:
+            [-1, 0],
+
+        w:
+            [-1, 0],
+
+        arrowdown:
+            [1, 0],
+
+        s:
+            [1, 0],
+
+        arrowleft:
+            [0, -1],
+
+        a:
+            [0, -1],
+
+        arrowright:
+            [0, 1],
+
+        d:
+            [0, 1]
+
+    };
+
+    if (
+        dirs[key]
+    ) {
+
+        e.preventDefault();
+
+        state.nextDir =
+            dirs[key];
+
+    }
+
+}
 
 
-#region STREAMLIT APP
+/* ============================================================
+   MOBILE / TOUCH MOVEMENT
+   ============================================================ */
+function setTouchDirection(direction) {
+    if (
+        state.gameOver ||
+        state.awaitingGuess ||
+        state.paused ||
+        state.countdownActive
+    ) {
+        return;
+    }
 
-st.set_page_config(
-    page_title="Customer Ranking",
-    page_icon="🎮",
-    layout="wide",
+    state.nextDir = direction;
+    ROOT.focus({ preventScroll: true });
+}
+
+const touchDirections = {
+    "move-up": [-1, 0],
+    "move-down": [1, 0],
+    "move-left": [0, -1],
+    "move-right": [0, 1]
+};
+
+Object.entries(touchDirections).forEach(([id, direction]) => {
+    const button = document.getElementById(id);
+    if (!button) return;
+
+    const press = (event) => {
+        event.preventDefault();
+        button.classList.add("pressed");
+        setTouchDirection(direction);
+    };
+
+    const release = (event) => {
+        if (event) event.preventDefault();
+        button.classList.remove("pressed");
+    };
+
+    button.addEventListener("pointerdown", press);
+    button.addEventListener("pointerup", release);
+    button.addEventListener("pointercancel", release);
+    button.addEventListener("pointerleave", release);
+    button.addEventListener("contextmenu", event => event.preventDefault());
+});
+
+/* Swipe anywhere on the canvas to change direction. */
+let swipeStartX = null;
+let swipeStartY = null;
+const SWIPE_MIN = 22;
+
+canvas.addEventListener(
+    "touchstart",
+    (event) => {
+        if (!event.touches || event.touches.length !== 1) return;
+        swipeStartX = event.touches[0].clientX;
+        swipeStartY = event.touches[0].clientY;
+        event.preventDefault();
+    },
+    { passive: false }
+);
+
+canvas.addEventListener(
+    "touchmove",
+    (event) => {
+        // Prevent the page from scrolling while the player is swiping the maze.
+        event.preventDefault();
+    },
+    { passive: false }
+);
+
+canvas.addEventListener(
+    "touchend",
+    (event) => {
+        if (swipeStartX === null || swipeStartY === null) return;
+
+        const touch = event.changedTouches && event.changedTouches[0];
+        if (!touch) return;
+
+        const dx = touch.clientX - swipeStartX;
+        const dy = touch.clientY - swipeStartY;
+        swipeStartX = null;
+        swipeStartY = null;
+
+        if (Math.max(Math.abs(dx), Math.abs(dy)) < SWIPE_MIN) return;
+
+        if (Math.abs(dx) > Math.abs(dy)) {
+            setTouchDirection(dx > 0 ? [0, 1] : [0, -1]);
+        } else {
+            setTouchDirection(dy > 0 ? [1, 0] : [-1, 0]);
+        }
+
+        event.preventDefault();
+    },
+    { passive: false }
+);
+
+/* ============================================================
+   BUTTON LISTENERS
+   ============================================================ */
+
+ROOT.addEventListener(
+    "keydown",
+    keyHandler
+);
+
+document
+    .getElementById(
+        "restart"
+    )
+    .addEventListener(
+        "click",
+        () => {
+
+            recordGameStart();
+
+            resetGame(
+                true
+            );
+
+        }
+    );
+
+helpGameButton.addEventListener(
+    "click",
+    () => {
+        helpModal.style.display = "flex";
+    }
+);
+
+helpGameLiveButton.addEventListener(
+    "click",
+    () => {
+        // Opening Help during gameplay automatically pauses the game.
+        // Do not trigger the resume countdown if it was already paused.
+        if (
+            !state.gameOver &&
+            !state.awaitingGuess &&
+            !state.countdownActive &&
+            !state.paused
+        ) {
+            state.paused = true;
+            state.playerDir = [0, 0];
+            state.nextDir = [0, 0];
+            state.lastEvent = "🐾 Pawsing the Claws...";
+            render();
+        }
+
+        helpModal.style.display = "flex";
+    }
+);
+
+closeHelpButton.addEventListener(
+    "click",
+    () => {
+        helpModal.style.display = "none";
+        ROOT.focus();
+    }
+);
+
+helpModal.addEventListener(
+    "click",
+    (event) => {
+        if (event.target === helpModal) {
+            helpModal.style.display = "none";
+            ROOT.focus();
+        }
+    }
+);
+
+document.addEventListener(
+    "keydown",
+    (event) => {
+        if (
+            event.key === "Escape" &&
+            helpModal.style.display === "flex"
+        ) {
+            helpModal.style.display = "none";
+            ROOT.focus();
+        }
+    }
+);
+
+startGameButton.addEventListener(
+    "click",
+    () => {
+
+        introPanel.style.display =
+            "none";
+
+        gameArea.style.display =
+            "block";
+
+        recordGameStart();
+
+        resetGame(
+            true
+        );
+
+        ROOT.focus();
+
+    }
+);
+
+document
+    .getElementById(
+        "pause"
+    )
+    .addEventListener(
+        "click",
+        pauseGame
+    );
+
+guessButton.addEventListener(
+    "click",
+    submitGuess
+);
+
+/* Clicking game restores
+   keyboard focus */
+
+canvas.addEventListener(
+    "click",
+    () => {
+
+        ROOT.focus();
+
+    }
+);
+
+ROOT.addEventListener(
+    "click",
+    e => {
+
+        if (
+            e.target !== guessInput
+        ) {
+
+            ROOT.focus();
+
+        }
+
+    }
+);
+
+/* ============================================================
+   INITIAL STATE
+   IMPORTANT:
+   Game does NOT start yet.
+   User must press START GAME.
+   ============================================================ */
+
+resetGame(
+    false
+);
+
+})();
+
+</script>
+
+</div>
+
+"""
+
+# ============================================================
+# DISPLAY GAME
+# ============================================================
+
+CURRENT_USER_JSON = json.dumps(
+    st.session_state.get("username", "Player")
+)
+SUPABASE_URL_JSON = json.dumps(SUPABASE_URL)
+SUPABASE_PUBLIC_KEY_JSON = json.dumps(SUPABASE_PUBLIC_KEY)
+
+if not SUPABASE_URL or not SUPABASE_PUBLIC_KEY:
+    st.warning(
+        "Supabase scoreboard is not connected yet. Add `url` and "
+        "`publishable_key` under `[supabase]` in Streamlit Secrets."
+    )
+
+GAME_HTML_FOR_USER = (
+    GAME_HTML
+    .replace("__CURRENT_USER_JSON__", CURRENT_USER_JSON)
+    .replace("__SUPABASE_URL_JSON__", SUPABASE_URL_JSON)
+    .replace("__SUPABASE_PUBLIC_KEY_JSON__", SUPABASE_PUBLIC_KEY_JSON)
 )
 
-inject_css()
-auth_role = require_login()
+components.html(
+    GAME_HTML_FOR_USER,
+    height=825,
+    scrolling=True
+)
 
-# Validate the Excel database only AFTER successful login. A damaged xlsx
-# should never prevent the login page itself from loading.
-workbook_ok, workbook_error = ensure_workbook()
-if not workbook_ok:
-    st.error(
-        "The Customer_Scoring.xlsx file in this deployment is damaged or incomplete. "
-        "The app will not overwrite it automatically."
-    )
-
-    if auth_role == "admin":
-        st.info("Upload a valid Customer_Scoring.xlsx below to repair the app.")
-        recovery_file = st.file_uploader(
-            "Replacement Customer_Scoring.xlsx",
-            type=["xlsx"],
-            key="recovery_database_upload",
-        )
-
-        if recovery_file is not None and st.button(
-            "REPLACE DAMAGED WORKBOOK",
-            type="primary",
-            use_container_width=True,
-        ):
-            try:
-                payload = recovery_file.getvalue()
-                # Validate before replacing the deployed file.
-                check_wb = load_workbook(BytesIO(payload), read_only=True, data_only=True)
-                check_wb.close()
-                DATA_FILE.write_bytes(payload)
-                st.success("Workbook replaced successfully. Reloading app...")
-                st.rerun()
-            except Exception as exc:
-                st.error(f"That upload is not a valid Excel workbook: {exc}")
-    else:
-        st.warning("The scoring database needs to be repaired by the admin account.")
-
-    st.stop()
-
-init_session_state()
-
-header_logo, header_title, header_paw = st.columns([0.7, 4.8, 0.9], vertical_alignment="center")
-
-with header_logo:
-    if SPINMASTER_LOGO_PATH.exists():
-        st.image(str(SPINMASTER_LOGO_PATH), width=92)
-
-with header_title:
-    st.markdown(
-        """
-        <div class="sm-header">
-            <h1>CUSTOMER SCORING</h1>
-            <span>WEB V24 • CUSTOMER RANKING</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-with header_paw:
-    if PAW_HEADER_IMAGE_PATH.exists():
-        st.image(str(PAW_HEADER_IMAGE_PATH), width=82)
-
-with st.sidebar:
-    st.caption(f"Signed in as **{st.session_state.get('auth_username', '')}**")
-    st.caption("Full access" if auth_role == "admin" else "Ranking only")
-    if st.button("LOG OUT", use_container_width=True):
-        logout()
-
-    if auth_role == "admin":
-        st.divider()
-        st.header("Data file")
-
-        st.caption(
-            "The app reads and updates the bundled Customer_Scoring.xlsx. "
-            "Download a backup whenever needed."
-        )
-
-        uploaded_db = st.file_uploader(
-            "Load an existing Customer_Scoring.xlsx",
-            type=["xlsx"],
-            key="database_upload",
-        )
-
-        if uploaded_db is not None:
-            if st.button("Use uploaded workbook", use_container_width=True):
-                try:
-                    replace_data_file(uploaded_db)
-                    st.success("Workbook loaded.")
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"Could not load workbook: {exc}")
-
-        st.download_button(
-            "Download current workbook",
-            data=workbook_bytes(),
-            file_name="Customer_Scoring.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
-
-        st.divider()
-        st.caption("Optional images can later be added to an `assets` folder in GitHub.")
-
-if auth_role == "admin":
-    tab_score, tab_rank = st.tabs(["📝 Score Customers", "🏆 Customer Ranking"])
-else:
-    tab_score = None
-    (tab_rank,) = st.tabs(["🏆 Customer Ranking"])
-
-
-# -------------------- SCORE CUSTOMERS --------------------
-if auth_role == "admin":
-    with tab_score:
-        master = load_scoring_customer_master()
-        regions = list(master.keys())
-
-        if st.session_state.region not in regions and regions:
-            st.session_state.region = regions[0]
-
-        left, middle, right = st.columns([1.05, 1.05, 1.8], gap="large")
-
-        with left:
-            st.markdown('<div class="section-title">Selection</div>', unsafe_allow_html=True)
-
-            period_a, period_b = st.columns(2)
-
-            with period_a:
-                st.number_input(
-                    "Year",
-                    min_value=2020,
-                    max_value=2100,
-                    step=1,
-                    key="year",
-                )
-
-            with period_b:
-                st.number_input(
-                    "Week",
-                    min_value=1,
-                    max_value=53,
-                    step=1,
-                    key="week",
-                )
-
-            region = st.selectbox(
-                "Region",
-                options=regions,
-                key="region",
-            )
-
-            st.text_input(
-                "Search customer",
-                key="customer_search",
-                placeholder="Type part of customer name...",
-            )
-
-            entries = master.get(region, [])
-            search_text = st.session_state.customer_search.strip().lower()
-
-            visible_entries = [
-                e for e in entries
-                if search_text in e["customer"].lower()
-            ]
-
-            # Determine selection frequency before period field.
-            customer_names = [e["customer"] for e in visible_entries]
-
-            if st.session_state.customer not in customer_names:
-                st.session_state.customer = customer_names[0] if customer_names else ""
-
-            customer = st.selectbox(
-                "Customer",
-                options=customer_names if customer_names else [""],
-                key="customer",
-            )
-
-            frequency = (
-                get_customer_frequency(region, customer)
-                if customer else "Weekly"
-            )
-
-            if frequency == "Monthly":
-                st.selectbox(
-                    "Reporting month",
-                    options=list(range(1, 13)),
-                    format_func=lambda m: MONTH_LABELS[m - 1],
-                    key="month",
-                )
-                selected_weeks = weeks_for_month(int(st.session_state.month))
-                st.caption(
-                    "Monthly customer • score will be written to "
-                    + ", ".join(f"W{w}" for w in selected_weeks)
-                )
-            else:
-                st.caption(f"Weekly customer • score will be written to W{int(st.session_state.week)}")
-
-            completed = selected_completed_customers(frequency)
-
-            if customer:
-                if customer in st.session_state.pending_scores:
-                    st.info("🟦 This customer is already in the pending batch.")
-                elif customer in completed:
-                    st.success("✅ Already saved for the selected period.")
-                else:
-                    st.caption("⬜ Not scored yet for the selected period.")
-
-            st.caption("W = Weekly • M = Monthly")
-
-        with middle:
-            st.markdown('<div class="section-title">Score Customer</div>', unsafe_allow_html=True)
-            st.caption("Choose a score from 0 to 3 for each category.")
-
-            for category, tooltip in CATEGORIES:
-                st.radio(
-                    category,
-                    options=[0, 1, 2, 3],
-                    horizontal=True,
-                    key=f"score_{category}",
-                    help=tooltip,
-                )
-
-            add_col, reset_col = st.columns(2)
-
-            with add_col:
-                if st.button(
-                    "ADD TO BATCH",
-                    type="primary",
-                    use_container_width=True,
-                ):
-                    try:
-                        add_current_customer_to_batch(region, customer)
-                    except Exception as exc:
-                        st.error(str(exc))
-
-            with reset_col:
-                if st.button("RESET 3/3", use_container_width=True):
-                    for category, _ in CATEGORIES:
-                        st.session_state[f"score_{category}"] = 3
-                    st.rerun()
-
-            if PRIMAL_HATCH_IMAGE_PATH.exists():
-                try:
-                    st.image(str(PRIMAL_HATCH_IMAGE_PATH), width=150)
-                except Exception:
-                    pass
-
-        with right:
-            st.markdown('<div class="section-title">Pending Batch</div>', unsafe_allow_html=True)
-
-            rows = pending_table_rows()
-
-            if rows:
-                st.dataframe(
-                    rows,
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-                remove_customer = st.selectbox(
-                    "Pending customer to edit/remove",
-                    options=[""] + list(st.session_state.pending_scores.keys()),
-                )
-
-                b1, b2, b3 = st.columns(3)
-
-                with b1:
-                    if st.button("LOAD SCORES", use_container_width=True, disabled=not remove_customer):
-                        item = st.session_state.pending_scores[remove_customer]
-                        st.session_state.region = item["region"]
-                        st.session_state.customer = remove_customer
-                        st.session_state.year = item["year"]
-
-                        if item["frequency"] == "Monthly":
-                            st.session_state.month = month_for_week(item["target_weeks"][0])
-                        else:
-                            st.session_state.week = item["target_weeks"][0]
-
-                        for category, _ in CATEGORIES:
-                            st.session_state[f"score_{category}"] = int(item["scores"][category])
-
-                        st.rerun()
-
-                with b2:
-                    if st.button("REMOVE", use_container_width=True, disabled=not remove_customer):
-                        st.session_state.pending_scores.pop(remove_customer, None)
-                        st.rerun()
-
-                with b3:
-                    if st.button("CLEAR BATCH", use_container_width=True):
-                        st.session_state.pending_scores = {}
-                        st.rerun()
-
-                total_pending = len(st.session_state.pending_scores)
-                avg_pending = (
-                    sum(sum(item["scores"].values()) for item in st.session_state.pending_scores.values())
-                    / (total_pending * MAX_TOTAL)
-                    * 100
-                )
-
-                m1, m2 = st.columns(2)
-                m1.metric("Pending customers", total_pending)
-                m2.metric("Average health", f"{avg_pending:.0f}%")
-
-                if st.button(
-                    "ULTIMATE SAVE",
-                    type="primary",
-                    use_container_width=True,
-                ):
-                    save_pending_batch()
-
-            else:
-                st.info("No pending scores yet. Select a customer, score it, then add it to the batch.")
-
-            st.divider()
-
-            st.download_button(
-                "DOWNLOAD CUSTOMER_SCORING.XLSX",
-                data=workbook_bytes(),
-                file_name="Customer_Scoring.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
-
-
-# -------------------- CUSTOMER RANKING --------------------
-with tab_rank:
-    latest_year, latest_week = get_last_saved_period()
-    report_regions = ["All Regions"] + sorted(load_customer_master().keys())
-
-    # Region decides which frequency choices are meaningful.
-    region_frequency_options = {
-        "UK": ["Weekly"],
-        "GAS": ["All", "Weekly", "Monthly"],
-        "FR": ["All", "Weekly", "Monthly"],
-        "BNL": ["Weekly"],
-        "IT": ["Weekly"],
-        "IBER": ["Weekly"],
-        "GR": ["Monthly"],
-        "CEE": ["All", "Weekly", "Monthly"],
-        "NORDICS": ["Weekly"],
-    }
-
-    if st.session_state.rank_region not in report_regions:
-        st.session_state.rank_region = "All Regions"
-
-    # Render Region and Frequency first logically, even though View sits in the
-    # left visual column. This lets the View choices react to Frequency.
-    top1, top2, top3 = st.columns([1.1, 1, 1])
-
-    with top2:
-        rank_region = st.selectbox(
-            "Region",
-            options=report_regions,
-            key="rank_region",
-        )
-
-    allowed_frequencies = (
-        ["All", "Weekly", "Monthly"]
-        if rank_region == "All Regions"
-        else region_frequency_options.get(rank_region, ["All", "Weekly", "Monthly"])
-    )
-
-    if st.session_state.rank_frequency not in allowed_frequencies:
-        st.session_state.rank_frequency = "All" if "All" in allowed_frequencies else allowed_frequencies[0]
-
-    with top3:
-        rank_frequency = st.selectbox(
-            "Frequency",
-            options=allowed_frequencies,
-            key="rank_frequency",
-        )
-
-    if rank_frequency == "Weekly":
-        view_options = ["Current Week", "Last 4 Weeks", "Custom"]
-        default_mode = "Current Week"
-        allowed_custom_units = ["Weeks"]
-    elif rank_frequency == "Monthly":
-        view_options = ["Last Month", "Last 3 Months", "Custom"]
-        default_mode = "Last Month"
-        allowed_custom_units = ["Weeks", "Months"]
-    else:
-        view_options = ["Current Week", "Last 4 Weeks", "Last Month", "Last 3 Months", "Custom"]
-        default_mode = "Current Week"
-        allowed_custom_units = ["Weeks", "Months"]
-
-    if st.session_state.rank_mode not in view_options:
-        st.session_state.rank_mode = default_mode
-
-    with top1:
-        mode = st.selectbox(
-            "View",
-            options=view_options,
-            key="rank_mode",
-        )
-
-    if st.session_state.rank_custom_unit not in allowed_custom_units:
-        st.session_state.rank_custom_unit = allowed_custom_units[0]
-
-    custom_periods = []
-
-    if mode == "Current Week":
-        periods = [(latest_year, latest_week)]
-    elif mode == "Last 4 Weeks":
-        periods = periods_back(latest_year, latest_week, 4)
-    elif mode == "Last Month":
-        anchor_month = month_for_week(latest_week)
-        y, m = previous_reporting_month(latest_year, anchor_month, 1)
-        periods = periods_for_reporting_month(y, m)
-    elif mode == "Last 3 Months":
-        periods = periods_for_last_months(latest_year, latest_week, 3)
-    else:
-        c1, c2 = st.columns([1, 1])
-
-        with c1:
-            custom_count = st.number_input(
-                "Custom length",
-                min_value=1,
-                max_value=104,
-                step=1,
-                key="rank_custom_count",
-            )
-
-        with c2:
-            custom_unit = st.selectbox(
-                "Unit",
-                options=allowed_custom_units,
-                key="rank_custom_unit",
-            )
-
-        if rank_frequency == "Weekly":
-            st.caption("Custom Weekly view: choose how many weeks ending with the current reporting week.")
-        elif rank_frequency == "Monthly":
-            st.caption("Custom Monthly view: choose a number of weeks or previous reporting months.")
-        else:
-            st.caption("Custom view: choose how many weeks or previous reporting months to include.")
-
-        if custom_unit == "Months":
-            custom_periods = periods_for_last_months(latest_year, latest_week, int(custom_count))
-        else:
-            custom_periods = periods_back(latest_year, latest_week, int(custom_count))
-        periods = custom_periods
-
-    rows = prepare_visual_rows(periods, rank_region, rank_frequency)
-    display_year, display_week = periods[-1] if periods else (latest_year, latest_week)
-
-    ranking_image = render_ranking(
-        rows,
-        display_year,
-        display_week,
-        mode,
-        periods,
-        frequency_filter=rank_frequency,
-    )
-
-    st.image(ranking_image, use_container_width=True)
-
-    safe_mode = mode.replace(" ", "_")
-    png_name = (
-        f"Customer_Ranking_{safe_mode}_"
-        f"{rank_region.replace(' ', '_')}_"
-        f"{rank_frequency}.png"
-    )
-
-    st.download_button(
-        "EXPORT PNG",
-        data=image_to_png_bytes(ranking_image),
-        file_name=png_name,
-        mime="image/png",
-        type="primary",
-    )
-
-    with st.expander("Category / Health explanation"):
-        for category, tooltip in CATEGORIES:
-            st.markdown(f"**{category}**")
-            st.text(tooltip)
-
-        st.markdown(
-            """
-            **Health bar**
-
-            90–100% — Excellent  
-            75–89% — Good  
-            50–74% — Average  
-            25–49% — Poor  
-            0–24% — Critical
-            """
-        )
-
-#endregion STREAMLIT APP
