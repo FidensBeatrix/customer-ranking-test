@@ -4416,18 +4416,28 @@ function keyHandler(e) {
 /* ============================================================
    MOBILE / TOUCH MOVEMENT
    ============================================================ */
-function setTouchDirection(direction) {
-    if (
+function canAcceptMovement() {
+    return !(
         state.gameOver ||
         state.awaitingGuess ||
         state.paused ||
         state.countdownActive
-    ) {
-        return;
-    }
+    );
+}
 
-    state.nextDir = direction;
-    ROOT.focus({ preventScroll: true });
+function setTouchDirection(direction) {
+    if (!canAcceptMovement()) return;
+
+    // Copy the array so every input creates a fresh direction value.
+    state.nextDir = [direction[0], direction[1]];
+
+    // Some mobile browsers dislike focus({preventScroll:true}).
+    // Movement must still work even if focusing is unsupported.
+    try {
+        ROOT.focus({ preventScroll: true });
+    } catch (err) {
+        try { ROOT.focus(); } catch (_) {}
+    }
 }
 
 const touchDirections = {
@@ -4437,32 +4447,85 @@ const touchDirections = {
     "move-right": [0, 1]
 };
 
+/*
+   Use BOTH touch and pointer/click events.
+   This is intentionally redundant because Streamlit runs the game inside
+   an iframe and mobile Safari/Chrome do not always deliver pointer events
+   consistently to buttons inside embedded components.
+*/
 Object.entries(touchDirections).forEach(([id, direction]) => {
     const button = document.getElementById(id);
     if (!button) return;
 
-    const press = (event) => {
-        event.preventDefault();
+    let lastTouchAt = 0;
+
+    const activate = (event) => {
+        if (event && event.cancelable) event.preventDefault();
         button.classList.add("pressed");
         setTouchDirection(direction);
     };
 
     const release = (event) => {
-        if (event) event.preventDefault();
+        if (event && event.cancelable) event.preventDefault();
         button.classList.remove("pressed");
     };
 
-    button.addEventListener("pointerdown", press);
+    button.addEventListener(
+        "touchstart",
+        (event) => {
+            lastTouchAt = Date.now();
+            activate(event);
+        },
+        { passive: false }
+    );
+    button.addEventListener("touchend", release, { passive: false });
+    button.addEventListener("touchcancel", release, { passive: false });
+
+    button.addEventListener("pointerdown", (event) => {
+        // Avoid double-firing when touchstart already handled the same tap.
+        if (Date.now() - lastTouchAt < 700) return;
+        activate(event);
+    });
     button.addEventListener("pointerup", release);
     button.addEventListener("pointercancel", release);
     button.addEventListener("pointerleave", release);
+
+    button.addEventListener("click", (event) => {
+        // Click is a final fallback for browsers that suppress pointer events.
+        if (Date.now() - lastTouchAt < 700) {
+            if (event.cancelable) event.preventDefault();
+            return;
+        }
+        activate(event);
+        setTimeout(() => button.classList.remove("pressed"), 90);
+    });
+
     button.addEventListener("contextmenu", event => event.preventDefault());
 });
 
-/* Swipe anywhere on the canvas to change direction. */
+/* Swipe directly on the canvas. Direction is applied while moving,
+   not only after lifting the finger, so it feels responsive on phones. */
 let swipeStartX = null;
 let swipeStartY = null;
-const SWIPE_MIN = 22;
+let swipeHandled = false;
+const SWIPE_MIN = 18;
+
+function applySwipeFromPoint(clientX, clientY) {
+    if (swipeStartX === null || swipeStartY === null || swipeHandled) return;
+
+    const dx = clientX - swipeStartX;
+    const dy = clientY - swipeStartY;
+
+    if (Math.max(Math.abs(dx), Math.abs(dy)) < SWIPE_MIN) return;
+
+    swipeHandled = true;
+
+    if (Math.abs(dx) > Math.abs(dy)) {
+        setTouchDirection(dx > 0 ? [0, 1] : [0, -1]);
+    } else {
+        setTouchDirection(dy > 0 ? [1, 0] : [-1, 0]);
+    }
+}
 
 canvas.addEventListener(
     "touchstart",
@@ -4470,7 +4533,8 @@ canvas.addEventListener(
         if (!event.touches || event.touches.length !== 1) return;
         swipeStartX = event.touches[0].clientX;
         swipeStartY = event.touches[0].clientY;
-        event.preventDefault();
+        swipeHandled = false;
+        if (event.cancelable) event.preventDefault();
     },
     { passive: false }
 );
@@ -4478,8 +4542,12 @@ canvas.addEventListener(
 canvas.addEventListener(
     "touchmove",
     (event) => {
-        // Prevent the page from scrolling while the player is swiping the maze.
-        event.preventDefault();
+        if (!event.touches || event.touches.length !== 1) return;
+        applySwipeFromPoint(
+            event.touches[0].clientX,
+            event.touches[0].clientY
+        );
+        if (event.cancelable) event.preventDefault();
     },
     { passive: false }
 );
@@ -4487,27 +4555,26 @@ canvas.addEventListener(
 canvas.addEventListener(
     "touchend",
     (event) => {
-        if (swipeStartX === null || swipeStartY === null) return;
-
         const touch = event.changedTouches && event.changedTouches[0];
-        if (!touch) return;
+        if (touch) applySwipeFromPoint(touch.clientX, touch.clientY);
 
-        const dx = touch.clientX - swipeStartX;
-        const dy = touch.clientY - swipeStartY;
         swipeStartX = null;
         swipeStartY = null;
+        swipeHandled = false;
 
-        if (Math.max(Math.abs(dx), Math.abs(dy)) < SWIPE_MIN) return;
-
-        if (Math.abs(dx) > Math.abs(dy)) {
-            setTouchDirection(dx > 0 ? [0, 1] : [0, -1]);
-        } else {
-            setTouchDirection(dy > 0 ? [1, 0] : [-1, 0]);
-        }
-
-        event.preventDefault();
+        if (event.cancelable) event.preventDefault();
     },
     { passive: false }
+);
+
+canvas.addEventListener(
+    "touchcancel",
+    () => {
+        swipeStartX = null;
+        swipeStartY = null;
+        swipeHandled = false;
+    },
+    { passive: true }
 );
 
 /* ============================================================
